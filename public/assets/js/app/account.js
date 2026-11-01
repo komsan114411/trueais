@@ -5,8 +5,13 @@ import {
 } from '../lib.js';
 import { state, setUser, refreshUser, safeNext } from './state.js';
 import { icon } from './icons.js';
-import { pageHead, alertBox, initial } from './ui.js';
-import { formatPhoneTyping } from './phonefield.js';
+import { pageHead, alertBox, initial, supportLinks } from './ui.js';
+import { formatPhoneTyping, bindPhoneFormat } from './phonefield.js';
+
+// เข้าสู่ระบบด้วยเบอร์ (แป้นตัวเลข) หรืออีเมล (แป้นตัวอักษร) — จำว่าเครื่องนี้ใช้แบบไหน
+const ID_MODE_KEY = 'topup.loginMode';
+const loadIdMode = () => { try { return localStorage.getItem(ID_MODE_KEY) === 'email' ? 'email' : 'phone'; } catch { return 'phone'; } };
+const saveIdMode = (m) => { try { localStorage.setItem(ID_MODE_KEY, m); } catch { /* ignore */ } };
 
 /** หา input ในฟอร์มจากชื่อ (ไม่พึ่ง form.ชื่อ ซึ่งชนกับ property ของฟอร์มได้ เช่น form.name) */
 const fld = (form, name) => form.elements.namedItem(name);
@@ -45,18 +50,48 @@ export async function loginPage(ctx) {
       ${next !== '/' ? html`<div class="mb-2">${alertBox('info', 'กรุณาเข้าสู่ระบบเพื่อทำรายการต่อ')}</div>` : ''}
       <form class="stack" data-login novalidate>
         <div class="field"><label for="identifier">เบอร์โทรศัพท์ หรือ อีเมล</label>
-          <input class="input" id="identifier" name="identifier" autocomplete="username" inputmode="email" placeholder="08X-XXX-XXXX หรือ you@email.com" maxlength="120"><div class="error-text"></div></div>
+          <input class="input" id="identifier" name="identifier" type="text" autocomplete="username" inputmode="tel" autocapitalize="off" spellcheck="false" placeholder="08X-XXX-XXXX" maxlength="120">
+          <div class="row between wrap id-mode" style="--gap:6px"><span class="xsmall muted" data-id-hint>ใช้เบอร์มือถือที่สมัครไว้</span>
+            <button type="button" class="btn ghost sm" data-id-mode aria-controls="identifier">${icon('mail', 16)}<span>ใช้อีเมลแทน</span></button></div>
+          <div class="error-text"></div></div>
         <div class="field"><label for="password">รหัสผ่าน</label>${pwInput('password', 'password', 'current-password')}<div class="error-text"></div></div>
         <div data-err></div>
         <button class="btn primary lg block" type="submit" data-loading-text="กำลังเข้าสู่ระบบ...">เข้าสู่ระบบ</button>
       </form>
       ${s.registration_enabled !== false ? html`<p class="center small mt-3 mb-0">ยังไม่มีบัญชี? <a href="#/register${next !== '/' ? `?next=${encodeURIComponent(next)}` : ''}">สมัครสมาชิกฟรี</a></p>` : ''}
-      <p class="center xsmall muted mt-2 mb-0">ลืมรหัสผ่าน? ติดต่อผู้ดูแล${s.support_line ? ` LINE: ${s.support_line}` : ''}${s.support_phone ? ` โทร: ${s.support_phone}` : ''}</p>
+      <p class="center xsmall muted mt-2 mb-0">ลืมรหัสผ่าน? ติดต่อผู้ดูแล${supportLinks(s) ? html` ${supportLinks(s)}` : ''}</p>
     </section>
   </div>`);
   const form = ctx.view.querySelector('[data-login]');
   bindPwToggle(form);
   const errBox = form.querySelector('[data-err]');
+  // ลูกค้าส่วนใหญ่เข้าสู่ระบบด้วยเบอร์ → เปิดแป้นตัวเลขเป็นค่าเริ่มต้น · ใช้อีเมล = แตะสลับเป็นแป้นตัวอักษร
+  const idInput = fld(form, 'identifier');
+  const idHint = form.querySelector('[data-id-hint]');
+  const idBtn = form.querySelector('[data-id-mode]');
+  let idMode = loadIdMode();
+  const applyIdMode = (m, { refocus = false } = {}) => {
+    idMode = m;
+    idInput.setAttribute('inputmode', m === 'email' ? 'email' : 'tel');
+    idInput.placeholder = m === 'email' ? 'you@email.com' : '08X-XXX-XXXX';
+    idHint.textContent = m === 'email' ? 'ใช้อีเมลที่ผูกกับบัญชี' : 'ใช้เบอร์มือถือที่สมัครไว้';
+    setHTML(idBtn, m === 'email' ? html`${icon('phone', 16)}<span>ใช้เบอร์โทรแทน</span>` : html`${icon('mail', 16)}<span>ใช้อีเมลแทน</span>`);
+    if (refocus) {
+      // แป้นพิมพ์บนมือถือเปลี่ยนตามเมื่อโฟกัสใหม่ (ต้องเรียกในจังหวะที่ลูกค้าแตะ ไม่งั้น iPhone ไม่เปิดแป้นพิมพ์)
+      idInput.blur();
+      idInput.focus();
+    }
+  };
+  applyIdMode(idMode);
+  idBtn.addEventListener('click', () => {
+    const m = idMode === 'email' ? 'phone' : 'email';
+    saveIdMode(m);
+    applyIdMode(m, { refocus: true });
+  });
+  // พิมพ์/วางอีเมลในโหมดเบอร์ (เช่น แป้นพิมพ์จริง หรือเติมอัตโนมัติ) → สลับเป็นโหมดอีเมลให้
+  idInput.addEventListener('input', () => {
+    if (idMode === 'phone' && /[@a-z]/i.test(idInput.value)) { applyIdMode('email'); saveIdMode('email'); }
+  });
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     clearFieldErrors(form);
@@ -115,7 +150,7 @@ export async function registerPage(ctx) {
   bindPwToggle(form);
   const rules = form.querySelector('[data-rules]');
   const errBox = form.querySelector('[data-err]');
-  fld(form, 'phone').addEventListener('input', () => { fld(form, 'phone').value = formatPhoneTyping(fld(form, 'phone').value); });
+  bindPhoneFormat(fld(form, 'phone')); // จัดรูปแบบเบอร์โดยไม่ให้เคอร์เซอร์กระโดด (แก้ตัวเลขกลางเบอร์ได้)
   fld(form, 'password').addEventListener('input', () => setHTML(rules, pwRulesHtml(fld(form, 'password').value)));
   form.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -334,7 +369,7 @@ export async function accountPage(ctx) {
 
     ${s.support_line || s.support_phone ? html`<section class="card mt-2 row wrap">
       <span class="q-icon">${icon('headset', 20)}</span>
-      <div class="grow"><div class="bold">ติดต่อผู้ดูแล</div><div class="small muted">${s.support_line ? `LINE: ${s.support_line}` : ''}${s.support_line && s.support_phone ? ' · ' : ''}${s.support_phone ? `โทร: ${s.support_phone}` : ''}</div></div>
+      <div class="grow"><div class="bold">ติดต่อผู้ดูแล</div><div class="small muted support-links">${supportLinks(s)}</div></div>
     </section>` : ''}
 
     <button class="btn block mt-3 text-danger" data-logout>${icon('logout', 18)} ออกจากระบบ</button>`);

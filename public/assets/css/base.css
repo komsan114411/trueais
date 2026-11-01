@@ -11,19 +11,22 @@
   --border-strong: #cfd4df;
   --text: #161925;
   --text-2: #464c60;
-  --muted: #767d91;
+  /* สีตัวอักษรรอง/สถานะ: ผ่านเกณฑ์อ่านง่าย WCAG AA (≥ 4.5:1) บนพื้นขาว พื้นเทา และพื้นสีอ่อนของป้าย */
+  --muted: #61677a;
   --primary: #4f46e5;
   --primary-600: #4338ca;
   --primary-50: #eef0ff;
   --primary-100: #dfe2ff;
   --on-primary: #ffffff;
-  --success: #0f9a4c;
+  --success: #0a7a3c;
   --success-50: #e7f6ed;
-  --danger: #d92d43;
+  --on-success: #ffffff;
+  --danger: #c62839;
   --danger-50: #fdecee;
-  --warning: #b9740b;
+  --on-danger: #ffffff;
+  --warning: #8f5c00;
   --warning-50: #fff4de;
-  --info: #2563eb;
+  --info: #1f5ad1;
   --info-50: #e8f0fe;
   --ais: #5ba829;
   --true: #e4002b;
@@ -54,10 +57,14 @@
     --primary-600: #6d68ff;
     --primary-50: #1f1f45;
     --primary-100: #2a2a5c;
+    /* ปุ่มสีสว่างในโหมดมืด → ตัวอักษรสีเข้ม (ตัวอักษรขาวบนพื้นสว่างอ่านยาก) */
+    --on-primary: #0d0f15;
     --success: #34c472;
     --success-50: #102a1c;
+    --on-success: #0d0f15;
     --danger: #ff5a6e;
     --danger-50: #351419;
+    --on-danger: #0d0f15;
     --warning: #f0a63a;
     --warning-50: #33260f;
     --info: #5b93ff;
@@ -173,11 +180,14 @@ code, kbd, .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, "Liber
 .btn:active { transform: translateY(1px); }
 .btn:focus-visible { outline: none; box-shadow: var(--ring); }
 .btn[disabled], .btn.is-loading { opacity: 0.55; cursor: not-allowed; pointer-events: none; }
+/* ดูเหมือนปิดอยู่แต่ยังกดได้ — กดแล้วบอกว่ายังขาดอะไร (แทนปุ่ม disabled ที่กดแล้วเงียบ) */
+.btn.soft-disabled { opacity: 0.55; cursor: not-allowed; }
+.btn.soft-disabled:active { transform: none; }
 .btn.primary { --btn-bg: var(--primary); --btn-fg: var(--on-primary); --btn-bd: var(--primary); }
 .btn.primary:hover { background: var(--primary-600); }
-.btn.success { --btn-bg: var(--success); --btn-fg: #fff; --btn-bd: var(--success); }
+.btn.success { --btn-bg: var(--success); --btn-fg: var(--on-success); --btn-bd: var(--success); }
 .btn.success:hover { filter: brightness(0.95); background: var(--success); }
-.btn.danger { --btn-bg: var(--danger); --btn-fg: #fff; --btn-bd: var(--danger); }
+.btn.danger { --btn-bg: var(--danger); --btn-fg: var(--on-danger); --btn-bd: var(--danger); }
 .btn.danger:hover { filter: brightness(0.95); background: var(--danger); }
 .btn.soft { --btn-bg: var(--primary-50); --btn-fg: var(--primary); --btn-bd: transparent; }
 .btn.soft:hover { background: var(--primary-100); }
@@ -209,7 +219,7 @@ code, kbd, .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, "Liber
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .textarea { min-height: 96px; resize: vertical; line-height: 1.5; }
-.input::placeholder, .textarea::placeholder { color: var(--muted); opacity: 0.8; }
+.input::placeholder, .textarea::placeholder { color: var(--muted); opacity: 1; }
 .input:focus, .select:focus, .textarea:focus { outline: none; border-color: var(--primary); box-shadow: var(--ring); }
 .input[readonly] { background: var(--surface-2); }
 .input.lg { min-height: 54px; font-size: 1.25rem; font-weight: 600; letter-spacing: 0.02em; }
@@ -261,11 +271,12 @@ code, kbd, .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, "Liber
 .badge.pulse::before { animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.75); } }
 
+/* --net-ink = สีแบรนด์ที่เข้มขึ้นให้ตัวอักษรขาวอ่านง่าย (เช่น เขียว AIS) — ไม่มีให้ใช้ --net เดิม */
 .net-badge {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 46px; height: 22px; padding: 0 8px; border-radius: 6px;
-  font-size: 0.72rem; font-weight: 800; letter-spacing: 0.02em; color: #fff;
-  background: var(--net, var(--muted));
+  font-size: 0.75rem; font-weight: 800; letter-spacing: 0.02em; color: #fff; white-space: nowrap;
+  background: var(--net-ink, var(--net, var(--muted)));
 }
 
 /* ─── Alerts ─── */
@@ -312,22 +323,39 @@ code, kbd, .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, "Liber
 dialog.modal {
   width: min(520px, calc(100vw - 24px));
   max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px); /* ความสูงที่มองเห็นจริงบนมือถือ (ไม่รวมแถบที่อยู่ของเบราว์เซอร์) */
   padding: 0; border: 0; border-radius: var(--radius-lg);
   background: var(--surface); color: var(--text);
   box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
+/* หัว + ปุ่มด้านล่างเห็นเสมอ ส่วนเนื้อหาเลื่อนได้ (จอเตี้ย/จอเล็กก็กดปุ่มยืนยันได้) */
+dialog.modal[open] { display: flex; flex-direction: column; }
 dialog.modal.wide { width: min(860px, calc(100vw - 24px)); }
 dialog.modal::backdrop { background: rgba(10, 12, 20, 0.55); backdrop-filter: blur(2px); }
 dialog.modal[open] { animation: pop 0.18s var(--ease); }
 @keyframes pop { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
-.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 16px 18px; border-bottom: 1px solid var(--border); }
-.modal-head h3 { margin: 0; }
-.modal-body { padding: 18px; overflow-y: auto; max-height: calc(100vh - 170px); }
-.modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 18px; border-top: 1px solid var(--border); background: var(--surface-2); }
+.modal-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 16px 18px; border-bottom: 1px solid var(--border); }
+.modal-head h3 { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.modal-body { flex: 1 1 auto; min-height: 0; padding: 18px; overflow-y: auto; overscroll-behavior: contain; }
+.modal-foot { flex: none; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; padding: 14px 18px; border-top: 1px solid var(--border); background: var(--surface-2); }
 @media (max-width: 560px) {
-  dialog.modal { width: 100vw; max-width: 100vw; margin: auto 0 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+  dialog.modal {
+    width: 100vw; max-width: 100vw; margin: auto 0 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    max-height: calc(100vh - 12px); max-height: calc(100dvh - 12px);
+  }
+  .modal-head { padding: 14px 16px; }
+  .modal-body { padding: 16px; }
+  .modal-foot { padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
   .modal-foot .btn { flex: 1; }
+}
+/* จอเตี้ย (มือถือแนวนอน) → หัว/ท้ายหน้าต่างเล็กลง ให้เนื้อหาเหลือที่อ่าน */
+@media (max-height: 520px) {
+  dialog.modal { max-height: calc(100vh - 12px); max-height: calc(100dvh - 12px); }
+  .modal-head { padding: 8px 16px; }
+  .modal-head h3 { font-size: 1rem; }
+  .modal-body { padding: 12px 16px; }
+  .modal-foot { padding: 8px 16px calc(8px + env(safe-area-inset-bottom)); }
 }
 
 /* ─── Toast ─── */
@@ -339,6 +367,17 @@ dialog.modal[open] { animation: pop 0.18s var(--ease); }
 .toast.out { animation: toast-out 0.2s ease forwards; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 @keyframes toast-out { to { opacity: 0; transform: translateY(10px); } }
+/* toast ที่แสดงขณะเปิดหน้าต่าง (อยู่ใน <dialog> เพื่อไม่ให้ฉากหลังบัง) — จอเล็กแสดงด้านบน ไม่บังปุ่มยืนยันด้านล่าง */
+@media (max-width: 560px) {
+  dialog .toasts { top: calc(10px + env(safe-area-inset-top)); bottom: auto; }
+}
+
+/* ─── ชี้ส่วนที่ยังไม่ครบ (กดปุ่มก่อนกรอกครบ) ─── */
+.attention { animation: attention 0.75s var(--ease) 2; }
+@keyframes attention {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warning) 0%, transparent); }
+  45% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--warning) 45%, transparent); }
+}
 
 /* ─── Description list ─── */
 .dl { display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; margin: 0; font-size: 0.92rem; }
@@ -367,4 +406,5 @@ dialog.modal[open] { animation: pop 0.18s var(--ease); }
 :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  .attention { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 55%, transparent); }
 }

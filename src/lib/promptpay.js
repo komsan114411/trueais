@@ -42,4 +42,30 @@ async function promptPaySvg(target, amountSatang) {
   return { payload, svg };
 }
 
-module.exports = { promptPayPayload, promptPaySvg, crc16 };
+/**
+ * แปลงหมายเลขพร้อมเพย์ที่แอดมินกรอก ให้เป็นตัวเลขล้วนที่สร้าง QR ได้จริง (ไม่ได้ = throw พร้อมเหตุผล)
+ *   เบอร์มือถือ 10 หลักขึ้นต้นด้วย 0 (รับ +66 / 66 ได้) · เลขบัตรประชาชน/ผู้เสียภาษี 13 หลัก · e-Wallet 15 หลัก
+ */
+function normalizePromptPayId(value) {
+  let s = String(value ?? '').trim().replace(/[\s-]/g, '');
+  if (!s) return '';
+  if (s.startsWith('+66')) s = `0${s.slice(3)}`;
+  else if (/^66\d{9}$/.test(s)) s = `0${s.slice(2)}`;
+  if (!/^\d+$/.test(s)) throw new Error('หมายเลขพร้อมเพย์ต้องเป็นตัวเลขเท่านั้น');
+  if (s.length === 10) {
+    if (!s.startsWith('0')) throw new Error('เบอร์มือถือพร้อมเพย์ต้องขึ้นต้นด้วย 0 (10 หลัก)');
+    return s;
+  }
+  if (s.length === 13 || s.length === 15) return s;
+  throw new Error(`หมายเลขพร้อมเพย์ต้องเป็นเบอร์มือถือ 10 หลัก เลขบัตร 13 หลัก หรือ e-Wallet 15 หลัก (ตอนนี้ ${s.length} หลัก)`);
+}
+
+/** แสดงหมายเลขพร้อมเพย์ให้อ่านง่าย (081-234-5678 / 1-2345-67890-12-3) */
+function formatPromptPayId(id) {
+  const s = String(id || '');
+  if (/^\d{10}$/.test(s)) return `${s.slice(0, 3)}-${s.slice(3, 6)}-${s.slice(6)}`;
+  if (/^\d{13}$/.test(s)) return `${s[0]}-${s.slice(1, 5)}-${s.slice(5, 10)}-${s.slice(10, 12)}-${s[12]}`;
+  return s;
+}
+
+module.exports = { promptPayPayload, promptPaySvg, crc16, normalizePromptPayId, formatPromptPayId };

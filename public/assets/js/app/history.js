@@ -85,7 +85,7 @@ export default async function historyPage(ctx) {
       return;
     }
     setHTML(listEl, html`
-      <div class="order-list only-mobile">${rows.map(orderItem)}</div>
+      <div class="order-list only-mobile">${rows.map((o) => orderItem(o, { reorder: true }))}</div>
       <div class="table-wrap only-desktop"><table class="table">
         <thead><tr><th>วันที่ / เลขที่</th><th>รายการ</th><th>เบอร์</th><th class="num">ชำระ</th><th>สถานะ</th><th></th></tr></thead>
         <tbody>${rows.map((o) => html`<tr class="clickable" data-ref="${o.ref}">
@@ -95,7 +95,8 @@ export default async function historyPage(ctx) {
           <td class="num nowrap">${phoneFmt(o.phone)}</td>
           <td class="num">฿${baht(o.price)}</td>
           <td>${statusBadge(o.status)}</td>
-          <td class="right"><button type="button" class="btn sm ghost" data-reorder="${o.ref}" title="ทำรายการเดิมอีกครั้ง">${icon('repeat', 16)} เติมซ้ำ</button></td>
+          <td class="right">${!o.final ? html`<span class="xsmall muted">รอผล</span>`
+            : html`<button type="button" class="btn sm ghost" data-reorder="${o.ref}" title="${o.status === 'success' ? 'ทำรายการเดิมอีกครั้ง' : 'ลองอีกครั้ง (เลือกเครือข่ายใหม่)'}">${icon('repeat', 16)} ${o.status === 'success' ? 'เติมซ้ำ' : 'ลองใหม่'}</button>`}</td>
         </tr>`)}</tbody>
       </table></div>
       ${pager(d)}`);
@@ -122,7 +123,8 @@ export default async function historyPage(ctx) {
   });
   on(listEl, 'click', '[data-reorder]', (e, el) => {
     const o = rows.find((x) => x.ref === el.dataset.reorder);
-    if (o) navigate(reorderPath(o));
+    const path = reorderPath(o); // ยังไม่รู้ผล = ไม่มีให้ทำซ้ำ
+    if (path) navigate(path);
   });
   on(listEl, 'click', 'tr[data-ref]', (e, el) => {
     if (e.target.closest('[data-reorder]')) return;

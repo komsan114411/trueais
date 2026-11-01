@@ -1,21 +1,40 @@
 'use strict';
-// ตรวจความปลอดภัยของการตั้งค่า — แสดงตอนเปิดระบบ และเป็นรายการตรวจในหน้าแดชบอร์ดแอดมิน
+// ตรวจความปลอดภัย + ความพร้อมเปิดร้าน — แสดงตอนเปิดระบบ และเป็นรายการตรวจ "พร้อมเปิดร้านหรือยัง" ในหน้าแดชบอร์ดแอดมิน
 const config = require('../config');
 const db = require('../db');
 const { channels } = require('../lib/notify');
 
+/** PUBLIC_URL เป็นที่อยู่บนอินเทอร์เน็ตจริง (ไม่ใช่เครื่องตัวเอง/วงแลน) = กำลังเปิดให้ลูกค้าใช้งานจริง */
+function isPublicSite() {
+  let host;
+  try { host = new URL(config.publicUrl).hostname.toLowerCase(); } catch { return false; }
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.test')) return false;
+  if (host === '::1' || host === '[::1]' || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) return false;
+  return true;
+}
+
+// มีคำขอที่ผ่าน proxy (มี X-Forwarded-For) ทั้งที่ยังไม่ได้ตั้ง TRUST_PROXY → ทุกคนจะถูกมองเป็น IP เดียวกัน
+let forwardedSeen = false;
+function noteRequest(req) {
+  if (!forwardedSeen && req.headers['x-forwarded-for'] && !String(config.trustProxy || '').trim()) forwardedSeen = true;
+}
+
 /** ค่าตั้งใน .env ที่เสี่ยง (ไม่ขึ้นกับผู้ใช้) */
 function configWarnings() {
-  const out = [];
+  // ค่าในไฟล์ .env ที่พิมพ์ผิด (ระบบใช้ค่าเริ่มต้นแทน) — แสดงในหน้าแดชบอร์ดด้วย ไม่ใช่แค่ในหน้าต่างเปิดระบบ
+  const out = Array.isArray(config.warnings) ? config.warnings.map((w) => `ไฟล์ .env: ${w}`) : [];
   const tp = String(config.trustProxy || '').trim();
   if (tp && !/^\d+$/.test(tp) && tp !== 'true' && tp !== 'false' && /(^|,)\s*(0\.0\.0\.0\/0|::\/0)\s*(,|$)/.test(tp)) {
     out.push('TRUST_PROXY เชื่อทุก IP (0.0.0.0/0) — ใครก็ปลอม IP ผ่าน X-Forwarded-For ได้ ให้ใส่เฉพาะ IP/วงของ proxy จริง');
   }
-  if (config.isProd && !config.publicUrl.startsWith('https://')) {
-    out.push('PUBLIC_URL ยังไม่ใช่ https:// — ควรเปิดใช้ HTTPS ก่อนเปิดให้ลูกค้าใช้งานจริง (รหัสผ่านและคุกกี้จะถูกเข้ารหัส)');
+  if (forwardedSeen) {
+    out.push('เว็บนี้อยู่หลัง proxy (เช่น Cloudflare / Nginx) แต่ยังไม่ได้ตั้ง TRUST_PROXY — ระบบจะเห็นลูกค้าทุกคนเป็น IP เดียวกัน (การจำกัดความถี่/ล็อกการเข้าสู่ระบบจะกระทบทุกคน) ตั้ง TRUST_PROXY=1 ใน .env');
   }
-  if (config.isProd && !require('../providers').isLive()) {
-    out.push('ยังเป็นโหมดทดสอบ (PROVIDER=mock) — รายการจะไม่ถูกเติมจริง ห้ามรับเงินลูกค้าจริงในโหมดนี้');
+  if (isPublicSite() && !config.publicUrl.startsWith('https://')) {
+    out.push('PUBLIC_URL ยังไม่ใช่ https:// — ต้องเปิดใช้ HTTPS ก่อนให้ลูกค้าใช้งานจริง (รหัสผ่านและคุกกี้จะถูกเข้ารหัส)');
+  }
+  if ((config.isProd || isPublicSite()) && !require('../providers').isLive()) {
+    out.push('ยังเป็นโหมดทดสอบ (mock) — รายการจะไม่ถูกเติมจริง ห้ามรับเงินลูกค้าจริงในโหมดนี้');
   }
   if (!config.isTest && require('../providers').configured().includes('hubzell') && config.provider.concurrency > 4) {
     out.push(`PROVIDER_CONCURRENCY=${config.provider.concurrency} สูง — HubZell บล็อก IP 24 ชม. ถ้าเจอข้อผิดพลาดบัญชีซ้ำ 5 ครั้งใน 5 นาที แนะนำไม่เกิน 4`);
@@ -29,44 +48,114 @@ function configWarnings() {
   return out;
 }
 
-/** รายการตรวจสำหรับแอดมินที่ล็อกอินอยู่ → [{ key, level: 'warn' | 'info', message }] */
+/**
+ * รายการตรวจสำหรับแอดมินที่ล็อกอินอยู่
+ * → [{ key, level: 'warn' | 'info' | 'ok', message, link?, group: 'setup' | 'security' }]
+ *   setup = ความพร้อมเปิดร้าน (รับเงิน / ผู้ให้บริการ / ราคา / แจ้งเตือน / สำรองข้อมูล) · security = ความปลอดภัยของบัญชีและระบบ
+ *   link = หน้าที่ไปแก้ได้ (#/... = หลังบ้าน, /#/... = หน้าเว็บลูกค้า เช่น บัญชีของฉัน)
+ */
 function checklist(admin) {
   const users = require('./users');
   const backup = require('./backup');
-  const items = configWarnings().map((message) => ({ key: 'config', level: 'warn', message }));
+  const settings = require('./settings');
+  const providers = require('../providers');
+  const shops = require('./shops');
+  const catalog = require('./catalog');
+  const s = settings.all();
+  const items = [];
+  const add = (group, key, level, message, link) => items.push({ key, level, message, group, ...(link ? { link } : {}) });
+
+  // ───── ความปลอดภัย ─────
+  for (const message of configWarnings()) add('security', 'config', 'warn', message);
   if (users.bootstrapPasswordFileExists()) {
-    items.push({ key: 'bootstrap_password', level: 'warn', message: 'ยังใช้รหัสผ่านแอดมินที่ระบบสุ่มให้ (ไฟล์ data/ADMIN-PASSWORD.txt) — เปลี่ยนรหัสผ่านแล้วระบบจะลบไฟล์ให้อัตโนมัติ' });
+    add('security', 'bootstrap_password', 'warn', 'ยังใช้รหัสผ่านแอดมินที่ระบบสุ่มให้ (ไฟล์ data/ADMIN-PASSWORD.txt) — เปลี่ยนรหัสผ่านแล้วระบบจะลบไฟล์ให้อัตโนมัติ', '/#/account');
   }
   if (admin && !admin.totp_secret) {
-    items.push({ key: 'admin_2fa', level: 'warn', message: 'บัญชีของคุณยังไม่ได้เปิดยืนยันตัวตน 2 ชั้น — แนะนำให้เปิดที่หน้า "บัญชีของฉัน" (ใช้แอป Google Authenticator)' });
+    add('security', 'admin_2fa', 'warn', 'บัญชีของคุณยังไม่ได้เปิดยืนยันตัวตน 2 ชั้น — เปิดที่หน้า "บัญชีของฉัน" (ใช้แอป Google Authenticator)', '/#/account');
+  } else if (admin) {
+    add('security', 'admin_2fa', 'ok', 'บัญชีของคุณเปิดยืนยันตัวตน 2 ชั้นแล้ว');
   }
   const no2fa = db.get("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND status = 'active' AND totp_secret IS NULL").c;
   if (no2fa > (admin && !admin.totp_secret ? 1 : 0)) {
-    items.push({ key: 'admins_2fa', level: 'info', message: `มีแอดมิน ${no2fa} คนที่ยังไม่เปิดยืนยันตัวตน 2 ชั้น` });
+    add('security', 'admins_2fa', 'info', `มีแอดมิน ${no2fa} คนที่ยังไม่เปิดยืนยันตัวตน 2 ชั้น`, '#/users');
   }
-  // ผู้ให้บริการ (ร้าน)
-  const providers = require('../providers');
+
+  // ───── รับเงินจากลูกค้า ─────
+  if (!s.promptpay_id && !s.bank_accounts) {
+    add('setup', 'payment', 'warn', 'ยังไม่ได้ตั้งช่องทางรับเงิน (พร้อมเพย์ / บัญชีธนาคาร) — ลูกค้าเติมเงินเข้ากระเป๋าไม่ได้', '#/settings');
+  } else {
+    add('setup', 'payment', 'ok', s.promptpay_id ? 'ตั้งพร้อมเพย์รับเงินแล้ว (กด "ทดสอบ QR 1 บาท" ที่หน้าตั้งค่า แล้วตรวจชื่อผู้รับในแอปธนาคาร)' : 'ตั้งบัญชีธนาคารรับเงินแล้ว');
+  }
+  if (!s.support_line && !s.support_phone) {
+    add('setup', 'support', 'info', 'ยังไม่ได้ใส่ช่องทางติดต่อร้าน (LINE / เบอร์โทร) — ลูกค้าจะติดต่อไม่ได้เมื่อมีปัญหา', '#/settings');
+  }
+
+  // ───── ผู้ให้บริการ / ร้าน ─────
+  if (!providers.isLive()) {
+    add('setup', 'live', isPublicSite() ? 'warn' : 'info', 'ยังเป็นโหมดทดสอบ (ร้านทดสอบ) — รายการจะไม่ถูกเติมจริง ตั้ง PROVIDERS ใน .env เป็นผู้ให้บริการจริงก่อนเปิดร้าน', '#/providers');
+  }
+  let providersOk = true;
   for (const name of providers.configured()) {
     const p = providers.byName(name);
     const st = p.configStatus();
-    if (!st.ready) items.push({ key: `provider_${name}`, level: 'warn', message: `${p.label} ยังตั้งค่าไม่ครบ (${st.missing.join(', ')}) — ระบบจะไม่ส่งรายการไปร้านนี้` });
+    if (!st.ready) {
+      providersOk = false;
+      add('setup', `provider_${name}`, 'warn', `${p.label} ยังตั้งค่าไม่ครบ (${st.missing.join(', ')}) — ระบบจะไม่ส่งรายการไปร้านนี้`, '#/providers');
+    }
     if (st.ready && p.capabilities.catalog === 'mapped') {
       const n = db.get('SELECT COUNT(*) AS c FROM provider_map WHERE provider = ? AND enabled = 1', name).c;
-      if (!n) items.push({ key: `provider_${name}_map`, level: 'info', message: `${p.label} ยังไม่ได้จับคู่บริการ — ไปที่ "ผู้ให้บริการ & ร้าน" กด "ดึงรายการ" แล้วจับคู่ยอด/แพ็กเกจ` });
-      if (!config.publicUrl.startsWith('https://')) items.push({ key: `provider_${name}_https`, level: 'info', message: `${p.label} ส่งผลกลับ (callback) ได้เฉพาะ URL สาธารณะ — ตั้ง PUBLIC_URL เป็น https:// ของเว็บจริง (ระหว่างนี้ระบบเช็กสถานะเองอัตโนมัติ)` });
+      if (!n) {
+        providersOk = false;
+        add('setup', `provider_${name}_map`, 'warn', `${p.label} ยังไม่ได้จับคู่บริการ — ไปที่ "ผู้ให้บริการ & ร้าน" กด "ดึงรายการ" แล้วจับคู่ยอด/แพ็กเกจ`, '#/providers');
+      }
+      if (!config.publicUrl.startsWith('https://')) {
+        add('setup', `provider_${name}_https`, 'info', `${p.label} ส่งผลกลับ (callback) ได้เฉพาะ URL สาธารณะ — ตั้ง PUBLIC_URL เป็น https:// ของเว็บจริง (ระหว่างนี้ระบบเช็กสถานะเองอัตโนมัติ)`, '#/providers');
+      }
     }
   }
+  if (providersOk && providers.isLive()) add('setup', 'providers', 'ok', 'ผู้ให้บริการพร้อมรับรายการ');
+
+  // ───── ราคา: ร้านที่ส่วนลดเกินสูงสุด / การจับคู่ที่ขาดทุน / แพ็กเกจตัวอย่าง ─────
+  const nets = catalog.listNetworks();
+  const over = [];
+  for (const code of shops.visible()) {
+    for (const n of nets) {
+      if (shops.discountBp(code, n) > shops.maxDiscountBp(code, n)) over.push(`${shops.displayName(code)} ${n.name}`);
+    }
+  }
+  if (over.length) {
+    add('setup', 'shop_over_max', 'warn', `ส่วนลดเกินสูงสุด (ขายต่ำกว่าต้นทุน — ลูกค้าจะสั่งร้านนี้ไม่ได้): ${over.slice(0, 6).join(', ')}${over.length > 6 ? ' ...' : ''}`, '#/providers?tab=shops');
+  }
+  const lossMaps = db.all("SELECT * FROM provider_map WHERE enabled = 1").filter((m) => {
+    try { return m.cost > require('./providerMap').sellPrice(m); } catch { return false; }
+  });
+  if (lossMaps.length) add('setup', 'map_loss', 'warn', `มีการจับคู่บริการที่ต้นทุนสูงกว่าราคาขาย ${lossMaps.length} รายการ (ระบบจะไม่ใช้จนกว่าจะแก้ราคา)`, '#/providers');
+  if (providers.isLive() && db.get('SELECT COUNT(*) AS c FROM products WHERE is_demo = 1').c) {
+    add('setup', 'demo_products', 'info', 'ยังมีแพ็กเกจตัวอย่างในระบบ (ไม่แสดงให้ลูกค้าในโหมดจริง) — ลบได้ที่หน้า "สินค้า & เครือข่าย"', '#/catalog');
+  }
+
+  // ───── แจ้งเตือน ─────
   const ch = channels();
   if (!ch.line && !ch.telegram) {
-    items.push({ key: 'notify', level: 'info', message: 'ยังไม่ได้ตั้งค่าแจ้งเตือนผ่าน LINE หรือ Telegram (.env) — จะไม่รู้ทันทีเมื่อมีรายการต้องตรวจสอบ' });
+    add('setup', 'notify', 'info', 'ยังไม่ได้ตั้งค่าแจ้งเตือนผ่าน LINE หรือ Telegram (.env) — จะไม่รู้ทันทีเมื่อมีรายการต้องตรวจสอบ', '#/settings');
+  } else {
+    add('setup', 'notify', 'ok', 'ตั้งค่าแจ้งเตือนแล้ว (กด "ส่งข้อความทดสอบ" เพื่อตรวจว่าได้รับจริง)', '#/settings');
   }
+
+  // ───── สำรองข้อมูล ─────
   if (!config.isTest) {
     const latest = backup.list()[0];
     if (!latest || Date.now() - Date.parse(latest.created_at) > 48 * 3600000) {
-      items.push({ key: 'backup', level: 'warn', message: 'ไม่มีไฟล์สำรองข้อมูลในช่วง 2 วันที่ผ่านมา — กด "สำรองข้อมูลตอนนี้" ที่หน้าตั้งค่า และควรคัดลอกโฟลเดอร์ data/backups ไปเก็บที่อื่นด้วย' });
+      add('setup', 'backup', 'warn', 'ไม่มีไฟล์สำรองข้อมูลในช่วง 2 วันที่ผ่านมา — กด "สำรองข้อมูลตอนนี้" ที่หน้าตั้งค่า', '#/settings');
+    }
+    const dl = settings.getInternal('_last_backup_download', null);
+    if (!dl || Date.now() - Date.parse(dl) > 7 * 86400000) {
+      add('setup', 'backup_offsite', 'info', 'ยังไม่ได้ดาวน์โหลดไฟล์สำรองไปเก็บนอกเครื่องในสัปดาห์นี้ — ถ้าเครื่องเสีย/หาย ข้อมูลจะหายทั้งหมด (ดาวน์โหลดได้ที่หน้าตั้งค่า)', '#/settings');
+    } else {
+      add('setup', 'backup_offsite', 'ok', 'ดาวน์โหลดไฟล์สำรองเก็บนอกเครื่องแล้วในสัปดาห์นี้');
     }
   }
   return items;
 }
 
-module.exports = { configWarnings, checklist };
+module.exports = { configWarnings, checklist, noteRequest, isPublicSite };

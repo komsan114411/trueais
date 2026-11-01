@@ -6,7 +6,8 @@
  *   - คืนเงิน/ตัดเงินของรายการเดียวกันทำได้ครั้งเดียว (unique index ux_ledger_once)
  */
 const db = require('../db');
-const { E } = require('../lib/errors');
+const { E, AppError } = require('../lib/errors');
+const { fmt: fmtBaht } = require('../lib/money');
 const audit = require('./audit');
 
 const TYPE_LABELS = {
@@ -61,8 +62,12 @@ function debit(userId, amount, opts) {
  * แอดมินปรับยอด (+ เพิ่ม / - ลด) ต้องระบุเหตุผล
  * requestId (สร้างจากหน้าจอครั้งละ 1 ค่าต่อการกด) กันกดซ้ำ/เน็ตหลุดแล้วส่งใหม่จนปรับยอดสองรอบ
  */
-function adjust(userId, amountSigned, note, actor, ip, requestId = null) {
+const LARGE_ADJUST = 1000000; // 10,000 บาท — ปรับยอดมากกว่านี้ต้องยืนยันอีกครั้ง (กันพิมพ์เกิน เช่น 100000 แทน 1000)
+
+function adjust(userId, amountSigned, note, actor, ip, requestId = null, { confirmLarge = false } = {}) {
   if (!Number.isSafeInteger(amountSigned) || amountSigned === 0) throw E.validation('จำนวนเงินไม่ถูกต้อง');
+  // ห้ามปรับยอดกระเป๋าของตัวเอง (กันแอดมินเติมเงินให้ตัวเอง) — ให้แอดมินคนอื่นทำ
+  if (actor && Number(userId) === actor.id) throw new AppError('SELF_ACTION', 'ปรับยอดกระเป๋าของตัวเองไม่ได้ — ให้แอดมินคนอื่นทำ', 403);
   const reason = String(note ?? '').trim();
   if (reason.length < 3) throw E.validation('กรุณาระบุเหตุผลการปรับยอด (อย่างน้อย 3 ตัวอักษร)', { field: 'note' });
   let rid = null;
@@ -77,6 +82,14 @@ function adjust(userId, amountSigned, note, actor, ip, requestId = null) {
         if (ex.user_id !== Number(userId) || ex.amount !== amountSigned) throw E.conflict('REQUEST_MISMATCH', 'รหัสคำขอนี้ถูกใช้กับการปรับยอดอื่นไปแล้ว');
         return { balance: db.get('SELECT balance FROM users WHERE id = ?', ex.user_id).balance, existing: true };
       }
+    }
+    if (Math.abs(amountSigned) >= LARGE_ADJUST && !confirmLarge) {
+      throw new AppError('LARGE_ADJUST', `ยอด ${fmtBaht(Math.abs(amountSigned))} บาท สูงกว่าปกติ — กรุณาตรวจตัวเลขแล้วยืนยันอีกครั้ง`, 409, { amount: amountSigned });
+    }
+    if (amountSigned < 0) {
+      const bal = db.get('SELECT balance FROM users WHERE id = ?', Number(userId))?.balance;
+      if (bal === undefined) throw E.notFound('ไม่พบผู้ใช้');
+      if (-amountSigned > bal) throw E.validation(`หักได้สูงสุด ${fmtBaht(bal)} บาท (ยอดคงเหลือของลูกค้า)`, { field: 'amount' });
     }
     const opts = { type: 'adjust', refType: 'admin', refId: actor.id, note: reason, actorId: actor.id, requestId: rid };
     const balance = amountSigned > 0 ? credit(userId, amountSigned, opts) : debit(userId, -amountSigned, opts);
@@ -103,6 +116,24 @@ function ledger({ userId, type, page, pageSize } = {}) {
   });
   res.rows = res.rows.map((r) => ({ ...r, type_label: TYPE_LABELS[r.type] || r.type }));
   return res;
+}
+
+/**
+ * รายการเดินบัญชีสำหรับลูกค้า — ไม่เปิดเผยหมายเหตุภายในของแอดมิน (เหตุผลปรับยอด), ชื่อ/รหัสแอดมิน และรหัสคำขอ
+ */
+function customerLedgerRow(r) {
+  return {
+    id: r.id,
+    type: r.type,
+    type_label: r.type_label,
+    amount: r.amount,
+    balance_after: r.balance_after,
+    note: r.type === 'adjust' ? 'ปรับยอดโดยผู้ดูแลระบบ' : r.note,
+    order_ref: r.order_ref || null,
+    ref_type: r.ref_type === 'order' || r.ref_type === 'deposit' ? r.ref_type : null,
+    ref_id: r.ref_type === 'order' || r.ref_type === 'deposit' ? r.ref_id : null,
+    created_at: r.created_at,
+  };
 }
 
 /** ตรวจความถูกต้อง: ยอดในกระเป๋าต้องเท่ากับผลรวมสมุดบัญชี */
@@ -133,4 +164,4 @@ function reconcileOrders(limit = 200) {
   );
 }
 
-module.exports = { credit, debit, adjust, ledger, reconcile, reconcileOrders, orderNet, nextSeq, TYPE_LABELS };
+module.exports = { credit, debit, adjust, ledger, reconcile, reconcileOrders, orderNet, nextSeq, TYPE_LABELS, customerLedgerRow };

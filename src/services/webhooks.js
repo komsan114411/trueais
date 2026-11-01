@@ -37,7 +37,7 @@ function merchantOrder(o) {
     status: o.status,
     status_label: STATUS_LABELS[o.status],
     final: ['success', 'failed', 'refunded'].includes(o.status),
-    message: o.provider_message,
+    message: require('./orderText').customerMessage(o),
     created_at: o.created_at,
     completed_at: o.completed_at,
     updated_at: o.updated_at,

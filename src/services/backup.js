@@ -8,13 +8,15 @@ const db = require('../db');
 const logger = require('../lib/logger');
 const { bangkokDate } = require('../lib/time');
 
-const KEEP = 14;
+const KEEP_DAYS = 14; // เก็บสำเนาล่าสุดของแต่ละวัน 14 วัน
+const KEEP_RECENT = 10; // + สำเนาล่าสุด 10 ชุด (รวมที่กดสำรองเอง)
+const NAME_RE = /^topup-\d{4}-\d{2}-\d{2}-\d{4}\.db$/;
 const dir = () => path.join(config.dataDir, 'backups');
 
 function list() {
   if (!fs.existsSync(dir())) return [];
   return fs.readdirSync(dir())
-    .filter((f) => /^topup-\d{4}-\d{2}-\d{2}-\d{4}\.db$/.test(f))
+    .filter((f) => NAME_RE.test(f))
     .sort()
     .reverse()
     .map((f) => {
@@ -30,9 +32,31 @@ function backupNow() {
   const file = path.join(dir(), name);
   fs.rmSync(file, { force: true });
   db.raw().exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
-  for (const old of list().slice(KEEP)) fs.rmSync(path.join(dir(), old.name), { force: true });
+  prune();
   logger.info(`สำรองฐานข้อมูลแล้ว: ${name}`);
   return { name, size: fs.statSync(file).size };
+}
+
+function prune() {
+  const all = list(); // ใหม่สุดก่อน
+  const keep = new Set(all.slice(0, KEEP_RECENT).map((b) => b.name));
+  const days = new Set();
+  for (const b of all) {
+    const day = b.name.slice(6, 16);
+    if (!days.has(day) && days.size < KEEP_DAYS) {
+      days.add(day);
+      keep.add(b.name);
+    }
+  }
+  for (const b of all) if (!keep.has(b.name)) fs.rmSync(path.join(dir(), b.name), { force: true });
+}
+
+/** ที่อยู่ไฟล์สำรองสำหรับดาวน์โหลด (ชื่อต้องตรงรูปแบบและมีอยู่จริง กันอ่านไฟล์อื่นในเครื่อง) */
+function filePath(name) {
+  const n = String(name || '');
+  if (!NAME_RE.test(n)) return null;
+  const file = path.join(dir(), n);
+  return fs.existsSync(file) ? file : null;
 }
 
 function dailyBackup() {
@@ -41,4 +65,4 @@ function dailyBackup() {
   return backupNow();
 }
 
-module.exports = { list, backupNow, dailyBackup };
+module.exports = { list, backupNow, dailyBackup, filePath };

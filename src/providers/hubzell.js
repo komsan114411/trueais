@@ -413,7 +413,7 @@ async function getBalance() {
     const rule = ruleOf(e.code);
     // ปัญหาบัญชี/การตั้งค่า (เช่น key ผิด, IP ไม่อยู่ใน whitelist) → พักเจ้านี้ไว้ก่อน รายการใหม่จะไปเจ้าสำรอง
     const configError = rule?.trip && !['INSUFFICIENT_BALANCE', 'MAINTENANCE_MODE', 'VALIDATION_ERROR'].includes(e.code);
-    return { ok: false, code: e.code, message: `${e.code}: ${e.message || ''}`, ...(configError ? { trip: { seconds: rule.trip, reason: rule.reason } } : {}) };
+    return { ok: false, code: e.code, message: thaiError(e), ...(configError ? { trip: { seconds: rule.trip, reason: rule.reason } } : {}) };
   }
   const n = Number(e.data?.available);
   if (!Number.isFinite(n)) return { ok: false, message: 'อ่านยอดเครดิตไม่ได้' };
@@ -432,7 +432,7 @@ async function fetchCatalog() {
   const res = await request('GET', '/products', { query: `?category=MOBILE_TOPUP&currency=${encodeURIComponent(cfg.currency)}`, action: 'products', timeoutMs: 20000 });
   const e = envelope(res);
   if (res.error || !e) return { ok: false, message: res.error || `HTTP ${res.status}` };
-  if (e.status !== 0) return { ok: false, message: `${e.code}: ${e.message || ''}` };
+  if (e.status !== 0) return { ok: false, message: thaiError(e) };
   const products = (Array.isArray(e.data?.items) ? e.data.items : [])
     .flatMap((g) => (Array.isArray(g.products) ? g.products : []).map((p) => ({ ...p, category: p.category || g.category })))
     .filter((p) => p && p.product_id !== undefined && p.product_id !== null && String(p.product_id) !== '');
@@ -528,6 +528,12 @@ function handleCallback({ rawBody, headers, body }) {
     }],
     response: { status: 200, body: 'OK' },
   };
+}
+
+/** ข้อความผิดพลาดของ HubZell เป็นภาษาไทย (พร้อมรหัสเดิมไว้ค้นหา) */
+function thaiError(e) {
+  const rule = ruleOf(String(e?.code || ''));
+  return rule ? `${rule.reason} (${e.code})` : `HubZell ตอบ ${e?.code || 'ข้อผิดพลาด'}${e?.message && e.message !== e.code ? `: ${e.message}` : ''}`;
 }
 
 /** ใช้ในการทดสอบเท่านั้น: ล้างตัวนับภายใน */

@@ -46,4 +46,29 @@ const channels = () => ({
   telegram: Boolean(config.notify.telegramToken && config.notify.telegramChatId),
 });
 
-module.exports = { alertAdmin, channels };
+async function postResult(url, headers, body) {
+  try {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body), signal: AbortSignal.timeout(8000) });
+    if (res.ok) return { ok: true };
+    let detail = '';
+    try { detail = (await res.text()).slice(0, 200); } catch { /* ignore */ }
+    return { ok: false, error: `HTTP ${res.status}${detail ? ` — ${detail}` : ''}` };
+  } catch (e) {
+    // เช่น ENOTFOUND (หาเซิร์ฟเวอร์ไม่เจอ / ไม่มีอินเทอร์เน็ต), ETIMEDOUT, CERT_... — บอกสาเหตุจริงแทน "fetch failed"
+    const code = e.cause?.code || e.code;
+    return { ok: false, error: code ? `${e.message} (${code})` : e.message };
+  }
+}
+
+/** ส่งข้อความทดสอบไปทุกช่องทางที่ตั้งไว้ แล้วบอกผลทีละช่องทาง (ใช้ตรวจว่าตั้งค่า LINE/Telegram ถูกต้อง) */
+async function sendTest(text = 'ทดสอบการแจ้งเตือนจากระบบเติมเงิน ✅') {
+  const ch = channels();
+  const out = [];
+  const n = config.notify;
+  if (config.isTest) return { configured: ch.line || ch.telegram, channels: [] };
+  if (ch.line) out.push({ name: 'LINE', ...(await postResult('https://api.line.me/v2/bot/message/push', { Authorization: `Bearer ${n.lineToken}` }, { to: n.lineTo, messages: [{ type: 'text', text }] })) });
+  if (ch.telegram) out.push({ name: 'Telegram', ...(await postResult(`https://api.telegram.org/bot${n.telegramToken}/sendMessage`, {}, { chat_id: n.telegramChatId, text })) });
+  return { configured: ch.line || ch.telegram, channels: out };
+}
+
+module.exports = { alertAdmin, channels, sendTest };

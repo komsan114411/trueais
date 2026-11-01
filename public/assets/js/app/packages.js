@@ -1,40 +1,42 @@
 // หน้าแพ็กเกจเน็ต: เบอร์ → เลือกเครือข่าย → เลือกร้าน → เลือกหมวด/แพ็กเกจ → ยืนยัน
-import { html, raw, on, setHTML, bahtShort, navigate } from '../lib.js';
-import { state, networkOf, orderBlockReason, safeColor, onChange, shopList, shopOf, shopOpen, lastShop } from './state.js';
+import { html, raw, on, setHTML, bahtShort, navigate, debounce, toast } from '../lib.js';
+import { state, networkOf, orderBlockReason, netVars, onChange, shopList, shopOf, shopOpen, lastShop, refreshUser } from './state.js';
 import { icon } from './icons.js';
-import { pageHead, netTag, mockTips, alertBox, emptyState } from './ui.js';
+import { pageHead, netTag, mockTips, emptyState, alertBox, nudge } from './ui.js';
 import { phoneFieldHtml, bindPhoneField } from './phonefield.js';
 import { confirmAndOrder } from './confirm.js';
+import { netChoice } from './netchoice.js';
 
 export default async function packagesPage(ctx) {
   const q = ctx.query;
   const cat = () => state.catalog;
-  const nets = () => cat().networks;
   const shops = () => shopList();
   const preselect = q.product ? cat().products.find((p) => String(p.id) === String(q.product)) : null;
-  const qNet = networkOf(preselect?.network || q.network);
-  // ลิงก์ระบุเครือข่ายที่ไม่มีให้บริการแล้ว → ไม่สลับไปเครือข่ายอื่นเงียบๆ ให้ลูกค้าเลือกเอง
-  let missingNet = !qNet && q.network ? String(q.network).slice(0, 20) : null;
   const st = {
-    network: missingNet ? null : (qNet || nets().find((n) => n.package.open) || nets()[0])?.code,
     category: 'all',
     selected: preselect?.id || null,
     phone: null,
     shop: null,
   };
-  let shopTouched = false;
+  let shopTouched = Boolean(q.shop && shopOf(String(q.shop).toLowerCase()));
   let shopNotice = '';
+  let quotingId = null; // แพ็กเกจที่กำลังขอราคา (แสดงสถานะบนปุ่ม แทนการกดแล้วเงียบ)
+  let lastNet = null;
+  if (state.user) refreshUser(); // ยอดเงินล่าสุด
+
+  // เครือข่าย: แพ็กเกจ/ลิงก์ระบุมา = ใช้ตามนั้น · เบอร์ที่เคยเติมสำเร็จ = เลือกให้ · เบอร์ใหม่ = ให้ลูกค้าเลือกเอง
+  const nc = netChoice({ ctx, kind: 'package', network: preselect?.network || q.network, phone: q.phone, retry: q.retry, onUpdate: () => onNetUpdate() });
 
   setHTML(ctx.view, html`
     ${pageHead('แพ็กเกจเน็ต', 'สมัครแพ็กเกจเสริม เน็ต / โทร ใช้งานได้ทันที')}
     ${!cat().mode.live ? mockTips() : ''}
-    <section class="card mb-2">
+    <section class="card mb-2" data-phone-card>
       <div class="step-title"><span class="step-no">1</span>เบอร์ที่จะสมัครแพ็กเกจ</div>
-      ${phoneFieldHtml({ value: q.phone || '' })}
+      ${phoneFieldHtml({ value: q.phone || '', recent: true })}
     </section>
     <section class="card">
       <div class="step-title"><span class="step-no">2</span>เลือกเครือข่าย ร้าน และแพ็กเกจ</div>
-      <div class="segmented scroll net-tabs" data-tabs role="tablist"></div>
+      <div class="net-step" data-tabs></div>
       <div data-notice></div>
       <div data-shops></div>
       <div data-shop-notice></div>
@@ -44,6 +46,7 @@ export default async function packagesPage(ctx) {
     </section>`);
 
   const view = ctx.view;
+  const phoneCard = view.querySelector('[data-phone-card]');
   const tabsEl = view.querySelector('[data-tabs]');
   const noticeEl = view.querySelector('[data-notice]');
   const shopsEl = view.querySelector('[data-shops]');
@@ -61,29 +64,37 @@ export default async function packagesPage(ctx) {
     const list = shops();
     if (!list.length) return null;
     if (list.length === 1) return list[0].code;
-    const ok = list.filter((s) => shopOpen(s) && productsAt(s, st.network).length
-      && (!preselect || preselect.network !== st.network || (s.product_ids || []).includes(preselect.id)));
+    const ok = list.filter((s) => shopOpen(s) && productsAt(s, nc.code).length
+      && (!preselect || preselect.network !== nc.code || (s.product_ids || []).includes(preselect.id)));
     const pref = [q.shop ? String(q.shop).toLowerCase() : null, lastShop()].find((c) => c && ok.some((s) => s.code === c));
     return pref || ok[0]?.code || list.find(shopOpen)?.code || null;
   }
   function pickShop() {
     const s = shopOf(st.shop);
-    if (shopTouched && s && shopOpen(s) && productsAt(s, st.network).length) return;
-    if (shopTouched && s) shopNotice = `${s.name} ${!shopOpen(s) ? 'ปิดชั่วคราว' : 'ยังไม่มีแพ็กเกจของเครือข่ายนี้'} — เลือกร้านอื่นให้แล้ว`;
+    if (shopTouched && s && shopOpen(s) && productsAt(s, nc.code).length) return;
+    if (shopTouched && s && nc.code) shopNotice = `${s.name} ${!shopOpen(s) ? 'ปิดชั่วคราว' : 'ยังไม่มีแพ็กเกจของเครือข่ายนี้'} — เลือกร้านอื่นให้แล้ว`;
+    if (shopTouched && !nc.code) return; // ยังไม่ได้เลือกเครือข่าย → คงร้านที่ลูกค้าเลือกไว้
     shopTouched = false;
     st.shop = autoShop();
   }
 
+  /** เครือข่ายเปลี่ยน → ล้างหมวด/แพ็กเกจที่เลือกของเครือข่ายเดิม + เลือกร้านใหม่ถ้าจำเป็น */
+  function onNetUpdate() {
+    if (nc.code !== lastNet) {
+      lastNet = nc.code;
+      st.category = 'all';
+      const sel = cat().products.find((p) => p.id === st.selected);
+      if (sel && sel.network !== nc.code) st.selected = null;
+      pickShop();
+    }
+    renderAll();
+  }
+
   function renderTabs() {
-    setHTML(tabsEl, nets().map((n) => html`<button type="button" role="tab" data-net="${n.code}" class="${n.code === st.network ? 'active' : ''}"
-      aria-selected="${n.code === st.network ? 'true' : 'false'}"><span class="tab-dot" style="background:${raw(safeColor(n.color))}"></span>${n.name}
-      <span class="tab-count">${cat().products.filter((p) => p.network === n.code).length}</span></button>`));
-    const n = networkOf(st.network);
-    let notice = '';
-    if (!n && missingNet) notice = alertBox('warning', `เครือข่าย ${missingNet} ปิดให้บริการชั่วคราว — กรุณาเลือกเครือข่ายที่เบอร์นี้ใช้งานอยู่จริง`);
-    else if (n && !n.package.open) notice = alertBox('warning', n.notice || `${n.name} ปิดรับสมัครแพ็กเกจชั่วคราว`);
-    else if (n?.notice) notice = alertBox('info', n.notice);
-    setHTML(noticeEl, notice ? html`<div class="mt-2">${notice}</div>` : '');
+    const count = (n) => cat().products.filter((p) => p.network === n.code).length;
+    setHTML(tabsEl, html`${nc.label()}${nc.buttons({ sub: (n) => `${count(n)} แพ็กเกจ` })}`);
+    const notes = nc.notices();
+    setHTML(noticeEl, notes.length ? html`<div class="stack mt-2" style="--gap:8px">${notes}</div>` : '');
   }
 
   function renderShops() {
@@ -91,77 +102,98 @@ export default async function packagesPage(ctx) {
     if (list.length < 2) {
       // ร้านเดียว (เลือกให้แล้ว) หรือไม่มีข้อมูลร้าน → ไม่ต้องเลือก
       setHTML(shopsEl, list.length === 1 ? html`<div class="small muted mt-2">ร้าน: <b>${list[0].name}</b>${list[0].paused ? html` <span class="badge danger">ปิดชั่วคราว</span>` : ''}</div>` : '');
+    } else if (!nc.code) {
+      setHTML(shopsEl, '');
     } else {
       setHTML(shopsEl, html`<div class="label mt-2 mb-1">ร้าน</div><div class="chips">${list.map((s) => {
-        const count = productsAt(s, st.network).length;
+        const n = productsAt(s, nc.code).length;
         return html`<button type="button" class="chip sm ${s.code === st.shop ? 'active' : ''}" data-shop="${s.code}" aria-pressed="${s.code === st.shop ? 'true' : 'false'}"
-          ${!shopOpen(s) || !count ? raw('aria-disabled="true"') : ''}>${s.name} <span class="tab-count">${!shopOpen(s) ? 'ปิดชั่วคราว' : `${count} แพ็กเกจ`}</span></button>`;
+          ${!shopOpen(s) || !n ? raw('aria-disabled="true"') : ''}>${s.name} <span class="tab-count">${!shopOpen(s) ? 'ปิดชั่วคราว' : `${n} แพ็กเกจ`}</span></button>`;
       })}</div>`);
     }
     setHTML(shopNoticeEl, shopNotice ? html`<div class="mt-2">${alertBox('warning', shopNotice)}</div>` : '');
   }
 
   function renderCats() {
-    const cats = [...new Set(productsOf(st.network).map((p) => p.category).filter(Boolean))];
+    const cats = nc.code ? [...new Set(productsOf(nc.code).map((p) => p.category).filter(Boolean))] : [];
     if (!cats.includes(st.category)) st.category = 'all';
     setHTML(catsEl, cats.length > 1
-      ? [html`<button type="button" class="chip sm ${st.category === 'all' ? 'active' : ''}" data-cat="all">ทั้งหมด</button>`,
-        ...cats.map((c) => html`<button type="button" class="chip sm ${st.category === c ? 'active' : ''}" data-cat="${c}">${c}</button>`)]
+      ? [html`<button type="button" class="chip sm ${st.category === 'all' ? 'active' : ''}" data-cat="all" aria-pressed="${st.category === 'all' ? 'true' : 'false'}">ทั้งหมด</button>`,
+        ...cats.map((c) => html`<button type="button" class="chip sm ${st.category === c ? 'active' : ''}" data-cat="${c}" aria-pressed="${st.category === c ? 'true' : 'false'}">${c}</button>`)]
       : '');
+    catsEl.classList.toggle('hidden', cats.length < 2);
   }
 
   function renderGrid() {
-    const n = networkOf(st.network);
+    const n = networkOf(nc.code);
     const s = shopOf(st.shop);
-    const list = productsOf(st.network).filter((p) => st.category === 'all' || p.category === st.category);
+    if (!n) {
+      setHTML(gridEl, html`<div class="grid-span">${emptyState('wifi', 'เลือกเครือข่ายของเบอร์นี้ก่อน', 'แล้วจะแสดงแพ็กเกจของเครือข่ายนั้น (เบอร์ที่เคยเติมสำเร็จ ระบบเลือกให้อัตโนมัติ)')}</div>`);
+      return;
+    }
+    const list = productsOf(n.code).filter((p) => st.category === 'all' || p.category === st.category);
     if (!list.length) {
-      const title = !n ? 'กรุณาเลือกเครือข่ายของเบอร์ที่จะสมัคร' : !n.package.open ? 'ปิดรับสมัครแพ็กเกจชั่วคราว'
+      const title = !n.package.open ? 'ปิดรับสมัครแพ็กเกจชั่วคราว'
         : s && shops().length > 1 ? `${s.name} ยังไม่มีแพ็กเกจของ ${n.name}` : 'ยังไม่มีแพ็กเกจในหมวดนี้';
       setHTML(gridEl, html`<div class="grid-span">${emptyState('wifi', title, shops().length > 1 ? 'ลองเลือกร้าน เครือข่าย หรือหมวดอื่น' : 'ลองเลือกเครือข่ายหรือหมวดอื่น')}</div>`);
       return;
     }
-    const block = orderBlockReason() || (s && !shopOpen(s) ? `${s.name} ปิดชั่วคราว` : null);
-    setHTML(gridEl, list.map((p) => html`<div class="pkg-card ${st.selected === p.id ? 'selected' : ''}" data-product="${p.id}" style="--net:${raw(safeColor(n?.color))}">
-      <div class="pkg-top"><span class="pkg-cat">${p.category}</span>${netTag(p.network)}</div>
-      <div class="pkg-data">${p.data_label || p.name}</div>
-      <div class="pkg-name">${p.name}</div>
-      ${p.validity_days ? html`<div class="pkg-days">${icon('calendar', 14)} ใช้ได้ ${p.validity_days} วัน</div>` : ''}
-      ${p.description ? html`<div class="pkg-desc">${p.description}</div>` : ''}
-      <div class="pkg-foot">
-        <span class="pkg-price num">฿${bahtShort(p.price)}</span>
-        <button type="button" class="btn primary sm" data-buy="${p.id}" ${block ? raw('disabled') : ''}>สมัคร</button>
-      </div>
-    </div>`));
+    setHTML(gridEl, list.map((p) => {
+      const busy = quotingId === p.id;
+      return html`<div class="pkg-card ${st.selected === p.id ? 'selected' : ''}" data-product="${p.id}" style="${netVars(n.color)}">
+        <div class="pkg-top"><span class="pkg-cat">${p.category}</span>${netTag(p.network)}</div>
+        <div class="pkg-data">${p.data_label || p.name}</div>
+        <div class="pkg-name">${p.name}</div>
+        ${p.validity_days ? html`<div class="pkg-days">${icon('calendar', 14)} ใช้ได้ ${p.validity_days} วัน</div>` : ''}
+        ${p.description ? html`<div class="pkg-desc">${p.description}</div>` : ''}
+        <div class="pkg-foot">
+          <span class="pkg-price num">฿${bahtShort(p.price)}</span>
+          <button type="button" class="btn primary sm ${busy ? 'is-loading' : ''}" data-buy="${p.id}" ${busy ? raw('aria-busy="true"') : ''}>${busy ? html`<span class="spinner"></span>กำลังตรวจสอบ` : 'สมัคร'}</button>
+        </div>
+      </div>`;
+    }));
   }
 
-  const renderAll = () => { renderTabs(); renderShops(); renderCats(); renderGrid(); };
+  const renderAll = () => { renderTabs(); renderShops(); renderCats(); renderGrid(); syncUrl(); };
+
+  // ── URL ของหน้า = สิ่งที่เลือกไว้ (รีเฟรช / เซสชันหมดอายุ → กลับมาพร้อมข้อมูลเดิม) ──
+  const pathNow = (productId = st.selected) => {
+    const p = new URLSearchParams();
+    const sel = productId ? cat().products.find((x) => x.id === productId) : null;
+    if (sel) p.set('network', sel.network);
+    else if (nc.code && nc.explicit) p.set('network', nc.code);
+    else if (!nc.code && nc.retry) p.set('retry', nc.retry.network);
+    if (st.phone) p.set('phone', st.phone);
+    if (sel) p.set('product', String(sel.id));
+    if (st.shop && shopTouched) p.set('shop', st.shop);
+    const s = p.toString();
+    return `/packages${s ? `?${s}` : ''}`;
+  };
+  const syncUrl = debounce(() => {
+    if (!ctx.alive()) return;
+    const want = `#${pathNow()}`;
+    if (location.hash !== want) {
+      try { history.replaceState(history.state, '', want); } catch { /* ignore */ }
+    }
+  }, 400);
 
   const phoneField = bindPhoneField(view, {
-    onChange: (phone) => { st.phone = phone; },
-    onPick: (entry) => {
-      // เบอร์ในสมุดระบุเครือข่ายไว้ → ใช้เครือข่ายนั้นเสมอ (ถ้าไม่มีให้บริการ ให้เลือกเอง) ไม่คงเครือข่ายเดิมที่อาจผิด
-      const n = networkOf(entry.network);
-      if (entry.network && (n?.code || null) !== st.network) {
-        st.network = n?.code || null;
-        missingNet = n ? null : String(entry.network).slice(0, 20);
-        pickShop();
-        renderAll();
-      }
+    onChange: (phone) => {
+      if (phone === st.phone) return;
+      st.phone = phone;
+      nc.setPhone(phone); // → เลือกเครือข่ายที่เคยเติมสำเร็จให้ / ล้างที่ระบบเลือกไว้ของเบอร์เดิม
+      syncUrl();
     },
+    onPick: (entry) => nc.pick(entry),
   });
 
-  on(tabsEl, 'click', '[data-net]', (e, el) => {
-    st.network = el.dataset.net;
-    missingNet = null;
-    st.category = 'all';
-    pickShop();
-    renderAll();
-  });
+  on(tabsEl, 'click', '[data-net]', (e, el) => { nc.choose(el.dataset.net); });
+  on(noticeEl, 'click', '[data-use-hist]', () => nc.useHistory());
   on(shopsEl, 'click', '[data-shop]', (e, el) => {
     const s = shopOf(el.dataset.shop);
     if (!s) return;
     if (!shopOpen(s)) shopNotice = `${s.name} ปิดชั่วคราว กรุณาเลือกร้านอื่น`;
-    else if (!productsAt(s, st.network).length) shopNotice = `${s.name} ยังไม่มีแพ็กเกจของเครือข่ายนี้ — กรุณาเลือกร้านอื่น`;
+    else if (!productsAt(s, nc.code).length) shopNotice = `${s.name} ยังไม่มีแพ็กเกจของเครือข่ายนี้ — กรุณาเลือกร้านอื่น`;
     else {
       st.shop = s.code;
       shopTouched = true;
@@ -178,40 +210,61 @@ export default async function packagesPage(ctx) {
 
   on(gridEl, 'click', '[data-buy]', async (e, el) => {
     const p = cat().products.find((x) => String(x.id) === el.dataset.buy);
-    if (!p) return;
+    if (!p || quotingId) return;
     st.selected = p.id;
     gridEl.querySelectorAll('.pkg-card').forEach((card) => card.classList.toggle('selected', card.dataset.product === String(p.id)));
-    const returnPath = `/packages?network=${p.network}&product=${p.id}${st.phone ? `&phone=${st.phone}` : ''}${st.shop ? `&shop=${encodeURIComponent(st.shop)}` : ''}`;
+    const returnPath = pathNow(p.id);
+    syncUrl();
     if (!state.user) {
       navigate(`/login?next=${encodeURIComponent(returnPath)}`);
       return;
     }
     if (!st.phone) {
       phoneField.error('กรอกเบอร์ที่จะสมัครแพ็กเกจก่อน');
+      nudge(phoneCard);
       return;
     }
-    await confirmAndOrder(
-      { type: 'package', network: p.network, phone: st.phone, productId: p.id, ...(st.shop ? { shop: st.shop } : {}) },
-      {
-        returnPath,
-        onFieldError: (err) => {
-          if (err.details.field === 'phone') phoneField.error(err.message);
-          else if (err.details.field === 'shop' || err.details.field === 'productId') { shopNotice = err.message; renderShops(); }
+    const s = shopOf(st.shop);
+    const block = orderBlockReason() || (s && !shopOpen(s) ? `${s.name} ปิดชั่วคราว — กรุณาเลือกร้านอื่น` : null)
+      || (!networkOf(p.network)?.package.open ? `${networkOf(p.network)?.name || p.network} ปิดรับสมัครแพ็กเกจชั่วคราว` : null);
+    if (block) {
+      toast(block, 'warning', 5000);
+      return;
+    }
+    quotingId = p.id;
+    renderGrid();
+    try {
+      await confirmAndOrder(
+        { type: 'package', network: p.network, phone: st.phone, productId: p.id, ...(st.shop ? { shop: st.shop } : {}) },
+        {
+          returnPath,
+          onOpen: () => { quotingId = null; if (ctx.alive()) renderGrid(); },
+          onFieldError: (err) => {
+            if (err.details.field === 'phone') phoneField.error(err.message);
+            else if (err.details.field === 'shop' || err.details.field === 'productId') { shopNotice = err.message; renderShops(); }
+          },
         },
-      },
-    );
+      );
+    } finally {
+      if (quotingId) { quotingId = null; if (ctx.alive()) renderGrid(); }
+    }
   });
 
   // ข้อมูลร้าน/แพ็กเกจเปลี่ยน (โหลดใหม่) → วาดใหม่ คงสิ่งที่ลูกค้าเลือกไว้ถ้ายังใช้ได้
   const off = onChange((what) => {
     if (what !== 'catalog' || !ctx.alive() || !state.catalog) return;
+    nc.catalogChanged();
+    lastNet = nc.code;
     pickShop();
     renderAll();
   });
   ctx.onLeave(off);
 
+  lastNet = nc.code;
   st.shop = autoShop();
+  shopTouched = Boolean(q.shop) && st.shop === String(q.shop).toLowerCase(); // ร้านจากลิงก์ที่ยังใช้ได้ = ลูกค้าเลือกไว้
   st.phone = phoneField.value;
+  nc.setPhone(st.phone);
   renderAll();
   if (preselect) {
     const card = gridEl.querySelector(`[data-product="${preselect.id}"]`);

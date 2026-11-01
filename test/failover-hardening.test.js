@@ -455,7 +455,8 @@ test('ร้านแบบจับคู่บริการ: ปิดกา
 
   // ข) ยอด 25 บาท มีเฉพาะที่ HubZell (เครือข่ายไม่เปิดให้กรอกยอดเอง) → HubZell ไม่รับ → ห้ามส่งต่อเจ้าที่ไม่รองรับยอดนี้ → คืนเงิน
   assert.equal((await admin.put('/api/admin/networks/AIS', { topup_allow_custom: false })).status, 200);
-  const m25 = await admin.post('/api/admin/providers/hubzell/mappings', { service_id: 'HZ_AIS_20', kind: 'topup', network_code: 'AIS', face_value_baht: 25, enabled: true });
+  await admin.post('/api/admin/providers/hubzell/sync', {});
+  const m25 = await admin.post('/api/admin/providers/hubzell/mappings', { service_id: 'HZ_AIS_25', kind: 'topup', network_code: 'AIS', face_value_baht: 25, enabled: true });
   assert.equal(m25.status, 201, JSON.stringify(m25.body));
   try {
     fake.state.createOverrides.push({ http: 400, body: envelope('VALIDATION_ERROR') });
@@ -470,4 +471,24 @@ test('ร้านแบบจับคู่บริการ: ปิดกา
   }
   assert.deepEqual(wallet.reconcile(), []);
   assert.deepEqual(wallet.reconcileOrders(), []);
+});
+
+test('จับคู่บริการ HubZell: ชื่อบริการ/ต้นทุนไม่ตรงกับยอด → ต้องยืนยันก่อน / บริการเดียวจับคู่ 2 ยอดไม่ได้', async () => {
+  await admin.post('/api/admin/providers/hubzell/sync', {});
+  // บริการ "AIS 25 บาท" จับคู่กับยอด 30 → ลูกค้าจ่าย 30 แต่ได้ 25 → ต้องเตือน
+  const warn = await admin.post('/api/admin/providers/hubzell/mappings', { service_id: 'HZ_AIS_25', kind: 'topup', network_code: 'AIS', face_value_baht: 30 });
+  assert.equal(warn.status, 409, JSON.stringify(warn.body));
+  assert.equal(warn.body.error.code, 'MAPPING_CHECK');
+  assert.ok(warn.body.error.details.warnings.some((w) => w.includes('25')), JSON.stringify(warn.body.error.details));
+  const ok = await admin.post('/api/admin/providers/hubzell/mappings', { service_id: 'HZ_AIS_25', kind: 'topup', network_code: 'AIS', face_value_baht: 30, confirm: true });
+  assert.equal(ok.status, 201, JSON.stringify(ok.body));
+  assert.ok(ok.body.data.check_warnings.length > 0, 'ตารางการจับคู่ยังแสดงคำเตือน');
+  // เปิดใช้ก็ต้องยืนยันอีกครั้ง
+  const en = await admin.put(`/api/admin/providers/hubzell/mappings/${ok.body.data.id}`, { enabled: true });
+  assert.equal(en.body.error.code, 'MAPPING_CHECK');
+  // บริการ AIS 50 จับคู่กับยอด 50 อยู่แล้ว → ใช้กับยอด 40 อีกไม่ได้
+  const dup = await admin.post('/api/admin/providers/hubzell/mappings', { service_id: 'HZ_AIS_50', kind: 'topup', network_code: 'AIS', face_value_baht: 40, confirm: true });
+  assert.equal(dup.status, 409);
+  assert.equal(dup.body.error.code, 'SERVICE_ALREADY_MAPPED');
+  assert.equal((await admin.del(`/api/admin/providers/hubzell/mappings/${ok.body.data.id}`)).status, 200);
 });

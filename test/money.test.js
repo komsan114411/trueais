@@ -6,6 +6,9 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 const { setupEnv, Client, waitFor, ADMIN_PASSWORD, CUSTOMER_PASSWORD } = require('./helpers');
 
+// รหัสสลิปที่แอดมินเห็น (ต้องส่งตอนอนุมัติ — กันลูกค้าเปลี่ยนสลิประหว่างแอดมินตรวจ)
+const slipVer = async (admin, id) => (await admin.get(`/api/admin/deposits?q=${id}`)).body.data.rows.find((d) => d.id === id)?.slip_ver;
+
 setupEnv();
 const { start } = require('../src/server');
 const db = require('../src/db');
@@ -148,10 +151,11 @@ test('เติมเงินกระเป๋า: กรอกเศษสต
   assert.equal((await admin.post(`/api/admin/deposits/${d2.id}/approve`, { no_slip: true })).status, 400, 'ต้องมีหมายเหตุ');
   assert.equal((await admin.post(`/api/admin/deposits/${d2.id}/approve`, { no_slip: true, note: 'เงินเข้า 10:42 ตรวจในแอปธนาคารแล้ว' })).status, 200);
 
-  const over = await admin.post(`/api/admin/deposits/${d1.id}/approve`, { amount: '150', note: 'ลูกค้าโอนเกิน' });
+  const v1 = await slipVer(admin, d1.id);
+  const over = await admin.post(`/api/admin/deposits/${d1.id}/approve`, { amount: '150', note: 'ลูกค้าโอนเกิน', slip_ver: v1 });
   assert.equal(over.status, 409);
   assert.equal(over.body.error.code, 'AMOUNT_OVER_REQUESTED');
-  const ok = await admin.post(`/api/admin/deposits/${d1.id}/approve`, { amount: '150', note: 'ลูกค้าโอนเกิน', confirm_over: true });
+  const ok = await admin.post(`/api/admin/deposits/${d1.id}/approve`, { amount: '150', note: 'ลูกค้าโอนเกิน', confirm_over: true, slip_ver: v1 });
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   assert.equal(balanceOf(c.user.id), d2.amount + 15000);
   assert.deepEqual(wallet.reconcile(), []);

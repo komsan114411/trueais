@@ -1,8 +1,40 @@
 // หน้าแรก
-import { html, raw, api, setHTML, baht, bahtShort } from '../lib.js';
-import { state, safeColor, shopList, shopNet, shopOpen, shopServes } from './state.js';
+import { html, api, on, setHTML, baht, bahtShort, phoneFmt } from '../lib.js';
+import { state, netVars, shopList, shopNet, shopOpen, shopServes, networkOf, recentNumbers, refreshUser, openDeposits } from './state.js';
 import { icon } from './icons.js';
-import { orderItem, emptyState } from './ui.js';
+import { orderItem, emptyState, draftBanner, netTag, depositBanner } from './ui.js';
+
+/**
+ * ทางลัด "เติมเบอร์เดิม": เปิดหน้าเติมเงิน/แพ็กเกจพร้อมข้อมูลเดิม (ยังต้องกดยืนยันตามปกติ)
+ * เครือข่ายที่ยังไม่เคยเติมสำเร็จ → ไม่ส่งไปในลิงก์ (หน้าเติมเงินจะให้ลูกค้าเลือก/ตรวจเครือข่ายเอง)
+ */
+function repeatPath(r) {
+  const p = new URLSearchParams();
+  const ok = Boolean(r.network_confirmed && networkOf(r.network));
+  if (ok) p.set('network', r.network);
+  p.set('phone', r.phone);
+  const pkg = r.last_topup_amount === null && r.last_package_id;
+  if (pkg) {
+    if (ok) p.set('product', String(r.last_package_id)); // แพ็กเกจผูกกับเครือข่าย → ใส่เฉพาะเมื่อรู้เครือข่ายแน่นอน
+  } else if (r.last_topup_amount) {
+    p.set('amount', String(r.last_topup_amount));
+  }
+  if (r.shop) p.set('shop', r.shop);
+  return `#/${pkg ? 'packages' : 'topup'}?${p.toString()}`;
+}
+
+function repeatCard(r) {
+  const ok = Boolean(r.network_confirmed);
+  const n = networkOf(r.network);
+  const what = r.last_topup_amount !== null ? `เติม ${Number(r.last_topup_amount).toLocaleString('th-TH')} บาท` : 'แพ็กเกจเดิม';
+  return html`<a class="repeat-card" href="${repeatPath(r)}" style="${netVars(ok ? n?.color : null)}">
+    <span class="repeat-main">
+      <span class="num bold">${phoneFmt(r.phone)}</span>
+      <span class="xsmall muted">${r.name || ''}${ok ? '' : html`${r.name ? ' · ' : ''}<span class="text-warning">ตรวจเครือข่ายอีกครั้ง</span>`}</span>
+    </span>
+    <span class="repeat-side">${ok && n ? netTag(n.code) : ''}<span class="repeat-btn">${icon('refresh', 14)} ${what}</span></span>
+  </a>`;
+}
 
 function netCardLink(n) {
   const closed = !n.topup.open;
@@ -10,7 +42,7 @@ function netCardLink(n) {
   const open = shopList().filter((s) => shopOpen(s) && shopServes(s, n.code));
   const bp = open.length ? Math.max(...open.map((s) => shopNet(s, n.code)?.discount_bp || 0)) : n.topup.discount_bp;
   const label = bp > 0 ? `${open.length > 1 ? 'ลดสูงสุด' : 'ลด'} ${bp / 100}%` : 'เติมเงิน';
-  return html`<a class="net-card ${closed ? 'closed' : ''}" href="#/topup?network=${n.code}" style="--net:${raw(safeColor(n.color))}">
+  return html`<a class="net-card ${closed ? 'closed' : ''}" href="#/topup?network=${n.code}" style="${netVars(n.color)}">
     <span class="net-logo">${n.name}</span>
     <span class="net-name">${n.full_name}</span>
     <span class="net-sub">${closed ? n.notice || 'ปิดชั่วคราว' : label}</span>
@@ -42,13 +74,19 @@ function pickPopular(products) {
 
 export default async function homePage(ctx) {
   const c = state.catalog;
-  const u = state.user;
   const s = c.settings;
-  let recent = [];
-  if (u) {
-    try { recent = (await api.get('/api/orders?pageSize=5')).rows; } catch { recent = []; }
+  let numbers = [];
+  let deposits = [];
+  if (state.user) {
+    // ยอดเงินล่าสุด + เบอร์ที่เคยเติม + เติมเงินเข้ากระเป๋าที่ยังค้าง (โหลดพร้อมกัน)
+    [, numbers, deposits] = await Promise.all([
+      refreshUser(),
+      recentNumbers().catch(() => []),
+      openDeposits().catch(() => []),
+    ]);
   }
   if (!ctx.alive()) return;
+  const u = state.user;
   const popular = pickPopular(c.products);
 
   setHTML(ctx.view, html`
@@ -70,6 +108,14 @@ export default async function homePage(ctx) {
           </div>`}
     </section>
 
+    ${u && deposits.length ? html`<div class="mt-2">${depositBanner(deposits)}</div>` : ''}
+    ${u && draftBanner() ? html`<div class="mt-2">${draftBanner()}</div>` : ''}
+
+    ${numbers.length ? html`<section class="mt-3">
+      <div class="section-h"><h2>เติมเบอร์เดิม</h2><a href="#/phonebook">สมุดโทรศัพท์ ${icon('chevronRight', 16)}</a></div>
+      <div class="repeat-grid">${numbers.slice(0, 4).map(repeatCard)}</div>
+    </section>` : ''}
+
     <section class="mt-3">
       <div class="section-h"><h2>เติมเงินมือถือ</h2><a href="#/topup">ทั้งหมด ${icon('chevronRight', 16)}</a></div>
       <div class="net-grid">${c.networks.map(netCardLink)}</div>
@@ -86,8 +132,8 @@ export default async function homePage(ctx) {
       <div class="pkg-grid">
         ${popular.map((p) => {
           const n = c.networks.find((x) => x.code === p.network);
-          return html`<a class="pkg-card pkg-link" href="#/packages?network=${p.network}&product=${p.id}" style="--net:${raw(safeColor(n?.color))}">
-            <div class="pkg-top"><span class="pkg-cat">${p.category}</span><span class="net-badge" style="--net:${raw(safeColor(n?.color))}">${n?.name || p.network}</span></div>
+          return html`<a class="pkg-card pkg-link" href="#/packages?network=${p.network}&product=${p.id}" style="${netVars(n?.color)}">
+            <div class="pkg-top"><span class="pkg-cat">${p.category}</span>${netTag(p.network)}</div>
             <div class="pkg-data">${p.data_label || p.name}</div>
             <div class="pkg-name">${p.name}</div>
             <div class="pkg-foot"><span class="pkg-price num">฿${bahtShort(p.price)}</span>${p.validity_days ? html`<span class="pkg-days">${icon('calendar', 14)} ${p.validity_days} วัน</span>` : ''}</div>
@@ -98,10 +144,7 @@ export default async function homePage(ctx) {
 
     ${u ? html`<section class="mt-3">
       <div class="section-h"><h2>รายการล่าสุด</h2><a href="#/history">ดูทั้งหมด ${icon('chevronRight', 16)}</a></div>
-      <div class="card flush">
-        ${recent.length ? html`<div class="order-list">${recent.map(orderItem)}</div>`
-          : emptyState('clock', 'ยังไม่มีรายการ', 'เริ่มเติมเงินหรือสมัครแพ็กเกจได้เลย', html`<a class="btn primary sm" href="#/topup">เติมเงินมือถือ</a>`)}
-      </div>
+      <div class="card flush" data-recent-orders><div class="p-3 stack">${[1, 2, 3].map(() => html`<div class="skeleton" style="height:52px"></div>`)}</div></div>
     </section>` : ''}
 
     <section class="trust mt-3">
@@ -109,4 +152,29 @@ export default async function homePage(ctx) {
       <div class="trust-item"><span class="t-icon">${icon('refresh', 20)}</span><div><div class="bold">ไม่สำเร็จคืนเงินอัตโนมัติ</div><div class="small muted">คืนเข้ากระเป๋าทันทีเมื่อผู้ให้บริการแจ้งไม่สำเร็จ</div></div></div>
       <div class="trust-item"><span class="t-icon">${icon('clock', 20)}</span><div><div class="bold">ตรวจสอบสถานะได้ตลอด</div><div class="small muted">ดูความคืบหน้าทุกขั้นตอนในประวัติ</div></div></div>
     </section>`);
+
+  // รายการล่าสุด: โหลดแยก — โหลดไม่สำเร็จต้องบอกว่าโหลดไม่ได้ (ไม่ใช่ขึ้นว่า "ยังไม่มีรายการ")
+  const box = ctx.view.querySelector('[data-recent-orders]');
+  async function loadRecent() {
+    if (!box) return;
+    let rows;
+    try {
+      rows = (await api.get('/api/orders?pageSize=5', { timeout: 20000 })).rows || [];
+    } catch (err) {
+      if (ctx.alive()) {
+        setHTML(box, emptyState('alert', 'โหลดรายการล่าสุดไม่สำเร็จ', err.message, html`<button type="button" class="btn sm" data-retry-recent>${icon('refresh', 16)} ลองใหม่</button>`));
+      }
+      return;
+    }
+    if (!ctx.alive()) return;
+    setHTML(box, rows.length ? html`<div class="order-list">${rows.map((o) => orderItem(o))}</div>`
+      : emptyState('clock', 'ยังไม่มีรายการ', 'เริ่มเติมเงินหรือสมัครแพ็กเกจได้เลย', html`<a class="btn primary sm" href="#/topup">เติมเงินมือถือ</a>`));
+  }
+  if (box) {
+    on(box, 'click', '[data-retry-recent]', (e, el) => {
+      el.disabled = true;
+      loadRecent();
+    });
+    loadRecent();
+  }
 }

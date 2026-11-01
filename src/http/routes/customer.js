@@ -25,7 +25,7 @@ router.get('/catalog', (req, res) => {
     ...catalog.publicCatalog(),
     settings: settings.publicSettings(),
     // paused = ผู้ให้บริการทุกเจ้าที่พร้อมใช้ ถูกพักชั่วคราวอยู่ (ถ้ายังเหลือเจ้าสำรอง ลูกค้าทำรายการได้ตามปกติ)
-    mode: { live: providers.isLive(), provider: providers.primary().name, ready: ready.length > 0, paused: ready.length > 0 && ready.every((n) => breaker.isOpen(n)) },
+    mode: { live: providers.isLive(), ready: ready.length > 0, paused: ready.length > 0 && ready.every((n) => breaker.isOpen(n)) },
   });
 });
 
@@ -79,7 +79,7 @@ router.get('/orders/export.csv', (req, res) => {
   const rows = orders.exportRows(req.query, { userId: req.user.id });
   sendCsv(res, `orders-${bangkokDate()}.csv`, [
     { label: 'เลขที่รายการ', key: 'ref' },
-    { label: 'วันที่', value: (r) => new Date(r.created_at).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' }) },
+    { label: 'วันที่ (เวลาไทย)', value: (r) => require('../../lib/time').bangkokDateTime(r.created_at) },
     { label: 'ประเภท', value: (r) => (r.type === 'topup' ? 'เติมเงิน' : 'แพ็กเกจ') },
     { label: 'เครือข่าย', key: 'network_code' },
     { label: 'รายการ', key: 'product_name' },
@@ -87,8 +87,8 @@ router.get('/orders/export.csv', (req, res) => {
     { label: 'ยอด (บาท)', value: (r) => (r.face_value / 100).toFixed(2) },
     { label: 'ชำระ (บาท)', value: (r) => (r.price / 100).toFixed(2) },
     { label: 'สถานะ', value: (r) => orders.STATUS_LABELS[r.status] },
-    { label: 'ข้อความ', key: 'provider_message' },
-  ], rows);
+    { label: 'ข้อความ', value: (r) => require('../../services/orderText').customerMessage(r) || '' },
+  ], rows, { note: rows.truncated ? orders.EXPORT_NOTE : null });
 });
 
 router.get('/orders/:ref', (req, res) => {
@@ -99,7 +99,8 @@ router.get('/orders/:ref', (req, res) => {
 
 router.get('/wallet', (req, res) => {
   const u = users.getById(req.user.id);
-  ok(res, { balance: u.balance, ledger: wallet.ledger({ userId: u.id, type: req.query.type, page: req.query.page, pageSize: req.query.pageSize }) });
+  const l = wallet.ledger({ userId: u.id, type: req.query.type, page: req.query.page, pageSize: req.query.pageSize });
+  ok(res, { balance: u.balance, ledger: { ...l, rows: l.rows.map(wallet.customerLedgerRow) } });
 });
 
 router.get('/deposits', (req, res) => {
@@ -128,6 +129,8 @@ router.post('/deposits/:id/cancel', (req, res) => {
 // ───────────── สมุดโทรศัพท์ ─────────────
 
 router.get('/phonebook', (req, res) => ok(res, phonebook.list(req.user)));
+// เบอร์ที่เคยทำรายการล่าสุด (กดเลือกได้ทันที ไม่ต้องพิมพ์)
+router.get('/phonebook/recent', (req, res) => ok(res, phonebook.recent(req.user)));
 router.post('/phonebook', (req, res) => ok(res, phonebook.add(req.user, req.body || {}), 201));
 router.put('/phonebook/:id', (req, res) => ok(res, phonebook.update(req.user, req.params.id, req.body || {})));
 router.delete('/phonebook/:id', (req, res) => {

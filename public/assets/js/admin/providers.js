@@ -3,13 +3,17 @@ import {
   html, raw, api, baht, dateTimeSec, timeAgo, netBadge, modal, confirmDialog, toast, toastError, withLoading, on, qs, copyText,
   showFieldError, clearFieldErrors,
 } from '../lib.js';
-import { icon, setQuery, emptyRow, networkOptions, store } from './common.js';
+import { icon, setQuery, emptyRow, networkOptions, store, confirmRoutingChange, ROUTING_KEYS, shortLabel } from './common.js';
 
 const sw = (name, checked, label) => html`<label class="switch"><input type="checkbox" name="${name}" ${checked ? raw('checked') : ''}><span class="track"></span><span class="small">${label}</span></label>`;
 const money = (satang) => (satang === null || satang === undefined ? '-' : baht(satang));
 /** ราคาขายเติมเงินหลังส่วนลด (สูตรเดียวกับเซิร์ฟเวอร์) */
 const afterDiscount = (satang, bp) => satang - Math.floor((satang * Math.max(0, bp)) / 10000);
 const BAHT_RE = /^\d{1,7}(\.\d{1,2})?$/;
+// กำไรต่อรายการสูงกว่านี้ (%) = ผิดปกติสำหรับเติมเงิน/แพ็กเกจ — อาจจับคู่กับบริการยอดที่น้อยกว่าที่ลูกค้าจ่าย
+const HIGH_MARGIN_PCT = 8;
+const marginOf = (m) => (typeof m.margin_pct === 'number' ? m.margin_pct : m.sell_price > 0 ? Math.round(((m.sell_price - m.cost) * 1000) / m.sell_price) / 10 : null);
+const pctText = (n) => `${Number(n).toLocaleString('th-TH', { maximumFractionDigits: 1 })}%`;
 
 // ───────────── แท็บ: ผู้ให้บริการ ─────────────
 
@@ -55,8 +59,6 @@ function providerCard(p) {
       <button class="btn sm" type="submit">${icon('plus')}เติมเครดิตจำลอง</button></form>`}
   </section>`;
 }
-
-const ROUTING_KEYS = ['routing_mode', 'failover_enabled', 'provider_priority', 'providers_disabled'];
 
 function routingForm(view, values, fields) {
   const f = Object.fromEntries(fields.filter((x) => ROUTING_KEYS.includes(x.key)).map((x) => [x.key, x]));
@@ -106,16 +108,8 @@ async function providersTab(box, reload) {
     if (!Object.keys(changed).length) { toast('ยังไม่มีการแก้ไข', 'info'); return; }
     withLoading(form.querySelector('[type="submit"]'), async () => {
       try {
-        // ปิดใช้บางเจ้า / ปิดการสลับอัตโนมัติ → ยืนยันก่อน (รายการใหม่จะไม่ไปเจ้านั้น / ไม่มีเจ้าสำรอง)
-        if ('providers_disabled' in changed || changed.failover_enabled === false) {
-          const ok = await confirmDialog({
-            title: 'ยืนยันเปลี่ยนการเลือกผู้ให้บริการ',
-            body: `${'providers_disabled' in changed ? `ปิดใช้ชั่วคราว: ${changed.providers_disabled || '(ไม่มี — เปิดใช้ทุกเจ้า)'} ` : ''}${changed.failover_enabled === false ? '· ปิดการสลับไปเจ้าสำรองอัตโนมัติ (ถ้าเจ้าที่เลือกไม่รับรายการ รายการจะไม่สำเร็จและคืนเงิน)' : ''} — มีผลกับรายการใหม่ทันที`,
-            confirmText: 'บันทึก',
-            danger: true,
-          });
-          if (!ok) return;
-        }
+        // ยืนยันทุกการเปลี่ยนการเลือกผู้ให้บริการ (หน้าต่างเดียวกับหน้าตั้งค่า) — ปิดใช้บางเจ้า / ปิดการสลับอัตโนมัติ = เตือนสีแดง
+        if (!(await confirmRoutingChange(changed, { values: settings.values, providers: view.providers }))) return;
         await api.put('/api/admin/settings', changed);
         toast('บันทึกการเลือกผู้ให้บริการแล้ว', 'success');
         store.refresh().catch(() => {});
@@ -175,24 +169,40 @@ async function providersTab(box, reload) {
 
 // ───────────── แท็บ: ราคาแต่ละร้าน ─────────────
 
+/**
+ * ส่วนลดที่ใช้อยู่ (ตั้งเอง หรือค่ามาตรฐาน) เกินสูงสุดที่ไม่ขาดทุนไหม — แสดงตั้งแต่เปิดหน้า (ไม่ต้องรอพิมพ์)
+ * ค่ามาตรฐานที่เกิน = ยอด/แพ็กเกจที่ขาดทุนจะไม่ถูกขายที่ร้านนี้ (ระบบไม่ขายต่ำกว่าต้นทุน)
+ */
+function overText(n, pct, inherit) {
+  if (!(Number(pct) > n.max_percent)) return '';
+  return inherit
+    ? `ค่ามาตรฐาน ${pct}% เกินสูงสุด ${n.max_percent}% — ร้านนี้จะขาย ${n.name} ไม่ได้ (บางยอด/ทั้งหมด) ให้ตั้งส่วนลดเองไม่เกิน ${n.max_percent}%`
+    : `เกินสูงสุด ${n.max_percent}% — ระบบจะไม่ให้บันทึก (ขาดทุน)`;
+}
+
 function shopForm(s) {
+  const overCount = s.networks.filter((n) => overText(n, n.discount_percent, !n.custom)).length;
   return html`<form class="card stack" data-shop="${s.code}" novalidate>
     <div class="card-head"><h3>${s.name} <span class="muted small">(${s.label})</span></h3>
       <span class="row wrap" style="--gap:6px">${s.visible ? html`<span class="badge success">ลูกค้าเห็นร้านนี้</span>` : html`<span class="badge">ลูกค้าไม่เห็น (ปิดใช้/ตั้งค่าไม่ครบ)</span>`}
-      ${s.mapped ? html`<span class="badge warning plain">ขายเฉพาะยอดที่จับคู่</span>` : ''}</span></div>
+      ${s.mapped ? html`<span class="badge warning plain">ขายเฉพาะยอดที่จับคู่</span>` : ''}
+      ${overCount ? html`<span class="badge danger">ส่วนลดเกินสูงสุด ${overCount} เครือข่าย</span>` : ''}</span></div>
     <div class="field"><label>ชื่อร้านที่ลูกค้าเห็น</label>
       <input class="input" name="display_name" maxlength="40" value="${s.display_name || ''}" placeholder="${s.default_name}">
       <div class="help">เว้นว่าง = ใช้ชื่อ "${s.default_name}"</div><div class="error-text"></div></div>
     <div class="table-wrap"><table class="table">
       <thead><tr><th>เครือข่าย</th><th>ส่วนลดลูกค้า (%)</th><th>ใช้ค่ามาตรฐาน</th><th>สูงสุดที่ไม่ขาดทุน</th>${s.mapped ? html`<th>ยอดที่ขายได้ (บาท)</th>` : ''}</tr></thead>
-      <tbody>${s.networks.map((n) => html`<tr data-net-row="${n.code}">
+      <tbody>${s.networks.map((n) => {
+        const over = overText(n, n.discount_percent, !n.custom);
+        return html`<tr data-net-row="${n.code}" class="${over ? 'row-review' : ''}">
         <td>${netBadge(n.code, n.name)}</td>
-        <td><input class="input" type="number" name="pct_${n.code}" min="0" max="100" step="0.01" value="${n.discount_percent}" ${n.custom ? '' : raw('disabled')} style="max-width:120px">
-          <div class="small text-danger hidden" data-over="${n.code}">เกินสูงสุด ${n.max_percent}% — ระบบจะไม่ให้บันทึก (ขาดทุน)</div></td>
+        <td><input class="input" type="number" name="pct_${n.code}" min="0" max="100" step="0.01" value="${n.discount_percent}" ${n.custom ? '' : raw('disabled')} style="max-width:120px" aria-label="ส่วนลดลูกค้า ${n.name} (%)">
+          <div class="small text-danger ${over ? '' : 'hidden'}" data-over="${n.code}" role="status">${over}</div></td>
         <td><label class="check"><input type="checkbox" name="inherit_${n.code}" ${n.custom ? '' : raw('checked')}>มาตรฐาน (${n.default_percent}%)</label></td>
         <td class="small">${n.max_percent}%</td>
         ${s.mapped ? html`<td class="small">${n.amounts?.length ? n.amounts.join(', ') : html`<span class="text-danger">ยังไม่มี (จับคู่ + เปิดใช้ก่อน)</span>`}</td>` : ''}
-      </tr>`)}</tbody>
+      </tr>`;
+      })}</tbody>
     </table></div>
     <div class="row" style="justify-content:flex-end"><button class="btn primary" type="submit">บันทึก ${s.name}</button></div>
   </form>`;
@@ -217,7 +227,14 @@ async function shopsTab(box, reload) {
     const s = shops.find((x) => x.code === form.dataset.shop);
     const code = input.name.slice('pct_'.length);
     const n = s.networks.find((x) => x.code === code);
-    form.querySelector(`[data-over="${CSS.escape(code)}"]`)?.classList.toggle('hidden', input.disabled || !(Number(input.value) > n.max_percent));
+    // ใช้ค่ามาตรฐาน (ช่องถูกปิด) ก็ยังเตือนถ้าค่ามาตรฐานเกินสูงสุด
+    const text = overText(n, input.value, input.disabled);
+    const warn = form.querySelector(`[data-over="${CSS.escape(code)}"]`);
+    if (warn) {
+      warn.textContent = text;
+      warn.classList.toggle('hidden', !text);
+    }
+    input.closest('tr')?.classList.toggle('row-review', Boolean(text));
   });
 
   box.addEventListener('submit', (e) => {
@@ -261,21 +278,72 @@ async function shopsTab(box, reload) {
 // ───────────── แท็บ: จับคู่บริการ (ผู้ให้บริการแบบราคาคงที่) ─────────────
 
 const kindLabel = (k) => (k === 'package' ? 'แพ็กเกจ' : 'เติมเงิน');
+/** ยอด/แพ็กเกจของเราที่ลูกค้าเลือก (ข้อความสั้น) */
+const ourItem = (m) => `${kindLabel(m.kind)} ${m.network_name || m.network_code} ${m.kind === 'topup' ? `${money(m.face_value)} บาท` : `"${m.product_name || `แพ็กเกจ #${m.product_id}`}"`}`;
+const serviceName = (x) => x?.service_name || x?.product_name || x?.service_id || '-';
+
+/** อธิบายการจับคู่ที่ใช้บริการนี้อยู่แล้ว (409 SERVICE_ALREADY_MAPPED) */
+function existingText(e) {
+  if (!e || typeof e !== 'object') return typeof e === 'string' ? e : '';
+  if (e.kind === 'topup') return `เติมเงิน ${e.network_code || ''} ${money(e.face_value)} บาท`;
+  return `แพ็กเกจ #${e.product_id ?? '-'}${e.network_code ? ` (${e.network_code})` : ''}`;
+}
+
+/**
+ * เซิร์ฟเวอร์ตรวจแล้วว่าการจับคู่ "ดูไม่ตรงกัน" (409 MAPPING_CHECK) — แสดงคำเตือน + ลูกค้าจ่ายเท่าไร ได้บริการอะไร แล้วให้ยืนยันเอง
+ * info = { pay, item, provider, service, cost }
+ */
+function confirmMappingCheck(err, info, { action = 'บันทึก' } = {}) {
+  const warnings = Array.isArray(err.details?.warnings) ? err.details.warnings : [];
+  return confirmDialog({
+    title: `ตรวจการจับคู่ก่อน${action}`,
+    body: html`<div class="stack">
+      <div class="alert danger"><span class="alert-icon">!</span><div><b>${err.message}</b>
+        ${warnings.length ? html`<ul class="check-list small">${warnings.map((w) => html`<li>${w}</li>`)}</ul>` : ''}</div></div>
+      <div class="map-line">
+        <div><span class="muted small">ลูกค้าเลือก</span><b>${info.item}</b><span class="small">จ่าย <b class="num">฿${money(info.pay)}</b></span></div>
+        <span class="map-arrow" aria-hidden="true">→</span>
+        <div><span class="muted small">${info.provider} จะส่งบริการ</span><b>"${info.service}"</b><span class="small">ต้นทุน <b class="num">฿${money(info.cost)}</b></span></div>
+      </div>
+      <p class="small mb-0">ตรวจว่าบริการนี้ให้ลูกค้า <b>ตรงกับที่จ่าย</b> จริง (เครือข่าย / ยอด / แพ็กเกจ) — ถ้าไม่แน่ใจ กด "ยกเลิก" แล้วตรวจชื่อบริการในระบบของ ${info.provider} ก่อน</p>
+    </div>`,
+    confirmText: `ตรวจแล้วถูกต้อง — ${action}`,
+    cancelText: 'ยกเลิก (กลับไปตรวจ)',
+    danger: true,
+  });
+}
 
 function mappingsTable(maps) {
   return html`<div class="table-wrap"><table class="table">
     <thead><tr><th>ประเภท</th><th>เครือข่าย</th><th>ยอด / แพ็กเกจของเรา</th><th>บริการของผู้ให้บริการ</th><th class="num">ต้นทุน</th><th class="num">ราคาขาย</th><th class="num">กำไร</th><th>เปิดใช้</th><th></th></tr></thead>
-    <tbody>${maps.length ? maps.map((m) => html`<tr class="${m.loss ? 'row-review' : ''}">
+    <tbody>${maps.length ? maps.map((m) => {
+      const warns = Array.isArray(m.check_warnings) ? m.check_warnings : [];
+      const mp = marginOf(m);
+      const high = !m.loss && mp !== null && mp > HIGH_MARGIN_PCT;
+      return html`<tr class="${m.loss || warns.length ? 'row-review' : ''}">
       <td class="small">${kindLabel(m.kind)}</td>
       <td>${netBadge(m.network_code, m.network_name)}</td>
       <td>${m.kind === 'topup' ? html`<b>${money(m.face_value)}</b> บาท` : html`${m.product_name || '-'} <span class="muted small">#${m.product_id}</span>`}</td>
-      <td class="small"><span class="mono">${m.service_id}</span>${m.service_name ? html`<span class="sub">${m.service_product ? `${m.service_product} · ` : ''}${m.service_name}</span>` : ''}</td>
+      <td class="small"><span class="mono">${m.service_id}</span>${m.service_name ? html`<span class="sub">${m.service_product ? `${m.service_product} · ` : ''}${m.service_name}</span>` : ''}
+        ${warns.length ? html`<ul class="map-warns">${warns.map((w) => html`<li>⚠ ${w}</li>`)}</ul>` : ''}</td>
       <td class="num">${money(m.cost)}</td>
       <td class="num">${money(m.sell_price)}</td>
-      <td class="num">${m.loss ? html`<span class="flag">ขาดทุน ${money(-m.profit)}</span>` : money(m.profit)}</td>
-      <td><label class="switch" title="เปิด/ปิดการจับคู่นี้"><input type="checkbox" data-map-enable="${m.id}" ${m.enabled ? raw('checked') : ''}><span class="track"></span></label></td>
+      <td class="num">${m.loss ? html`<span class="flag">ขาดทุน ${money(-m.profit)}</span>` : html`${money(m.profit)}${mp !== null ? html`<span class="sub ${high ? 'margin-high' : ''}" title="${high ? `กำไรสูงกว่า ${HIGH_MARGIN_PCT}% ผิดปกติ — ตรวจว่าบริการให้ยอด/แพ็กเกจตรงกับที่ลูกค้าจ่าย` : ''}">${high ? '⚠ ' : ''}${pctText(mp)}</span>` : ''}`}</td>
+      <td><label class="switch" title="เปิด/ปิดการจับคู่นี้"><input type="checkbox" data-map-enable="${m.id}" ${m.enabled ? raw('checked') : ''} aria-label="เปิดใช้การจับคู่ ${ourItem(m)}"><span class="track"></span></label></td>
       <td class="actions"><button type="button" class="btn ghost sm icon" data-map-del="${m.id}" title="ลบการจับคู่" aria-label="ลบการจับคู่">${icon('trash')}</button></td>
-    </tr>`) : emptyRow(9, 'ยังไม่มีการจับคู่ — เลือก "จับคู่" จากตารางบริการด้านล่าง')}</tbody></table></div>`;
+    </tr>`;
+    }) : emptyRow(9, 'ยังไม่มีการจับคู่ — เลือก "จับคู่" จากตารางบริการด้านล่าง')}</tbody></table></div>`;
+}
+
+/** สรุปเหนือตาราง: การจับคู่ที่มีคำเตือน / กำไรสูงผิดปกติ */
+function mappingAlerts(maps) {
+  const warned = maps.filter((m) => Array.isArray(m.check_warnings) && m.check_warnings.length);
+  const high = maps.filter((m) => !m.loss && marginOf(m) !== null && marginOf(m) > HIGH_MARGIN_PCT);
+  if (!warned.length && !high.length) return '';
+  return html`<div class="alert ${warned.some((m) => m.enabled) ? 'danger' : 'warning'} mt-2"><span class="alert-icon">!</span><div>
+    ${warned.length ? html`<div><b>การจับคู่ ${warned.length} รายการดูไม่ตรงกัน</b>${warned.some((m) => m.enabled) ? html` <span class="text-danger">(มีที่เปิดใช้อยู่ ${warned.filter((m) => m.enabled).length} รายการ)</span>` : ''} — ดูคำเตือนสีแดงในตาราง ตรวจให้แน่ใจว่าลูกค้าได้ตรงกับที่จ่าย</div>` : ''}
+    ${high.length ? html`<div class="small">กำไรสูงกว่า ${HIGH_MARGIN_PCT}% ${high.length} รายการ (ปกติเติมเงินได้กำไรไม่กี่ %) — อาจจับคู่กับบริการยอดที่น้อยกว่า</div>` : ''}
+  </div></div>`;
 }
 
 function catalogRows(rows) {
@@ -309,15 +377,17 @@ function syncSummary(r) {
 }
 
 /** หน้าต่างจับคู่บริการ 1 รายการ กับยอดเติม/แพ็กเกจของเรา */
-function mapDialog(name, row, shop) {
+function mapDialog(name, provLabel, row, shop) {
   const sugg = row.suggestion || {};
   const discountBp = (code) => Math.round((shop?.networks.find((n) => n.code === code)?.discount_percent || 0) * 100);
+  const svc = serviceName(row);
   return modal({
     title: `จับคู่บริการ ${row.service_id}`,
     wide: true,
     body: html`<form class="stack" data-form novalidate>
       <div class="small">บริการ <b class="mono">${row.service_id}</b> · ${row.product_name || ''} / ${row.service_name || ''} · ต้นทุน <b>${money(row.price)}</b> บาท</div>
       <div class="small text-2">ระบบเดาจากชื่อบริการให้แล้ว — กรุณาตรวจให้ถูกต้องก่อนบันทึก (จับคู่ผิด = ลูกค้าได้ยอด/แพ็กเกจไม่ตรงที่จ่าย)</div>
+      <div class="alert danger hidden" data-map-error role="alert"><span class="alert-icon">!</span><div data-map-error-text></div></div>
       <div class="form-grid">
         <div class="field"><label>ประเภท</label><select class="select" name="kind">
           <option value="topup" ${sugg.kind !== 'package' ? raw('selected') : ''}>เติมเงิน</option>
@@ -326,7 +396,7 @@ function mapDialog(name, row, shop) {
       </div>
       <div class="field" data-topup><label>ยอดเติม (บาท)</label><input class="input" name="face_value_baht" inputmode="numeric" value="${sugg.face_value ? sugg.face_value / 100 : ''}" placeholder="เช่น 100"><div class="error-text"></div></div>
       <div class="field hidden" data-package><label>แพ็กเกจในระบบ</label><select class="select" name="product_id"><option value="">กำลังโหลด...</option></select><div class="error-text"></div></div>
-      <div class="calc small" data-preview></div>
+      <div class="map-preview" data-preview aria-live="polite"></div>
       ${sw('enabled', false, 'เปิดใช้ทันที (ตรวจต้นทุน/ยอดแล้ว)')}
     </form>`,
     foot: html`<button class="btn" data-close>ยกเลิก</button><button class="btn primary" data-ok>บันทึกการจับคู่</button>`,
@@ -337,8 +407,15 @@ function mapDialog(name, row, shop) {
       const faceEl = form.querySelector('[name="face_value_baht"]');
       const prodEl = form.querySelector('[name="product_id"]');
       const preview = form.querySelector('[data-preview]');
+      const errBox = form.querySelector('[data-map-error]');
+      const showErr = (msg) => {
+        form.querySelector('[data-map-error-text]').textContent = msg;
+        errBox.classList.toggle('hidden', !msg);
+        if (msg) errBox.scrollIntoView({ block: 'nearest' });
+      };
       let products = [];
       let seq = 0;
+      let current = { sell: null, item: '' }; // ที่ลูกค้าจะจ่าย / ได้ (ใช้ในหน้าต่างยืนยัน)
       const loadProducts = async () => {
         const my = ++seq;
         prodEl.innerHTML = '<option value="">กำลังโหลด...</option>';
@@ -350,18 +427,40 @@ function mapDialog(name, row, shop) {
         } catch (err) { toastError(err); }
         updPreview();
       };
+      // บรรทัดสด: ลูกค้าจ่ายเท่าไร → ผู้ให้บริการส่งบริการอะไร (ต้นทุนเท่าไร) — เห็นทันทีถ้าจับคู่ผิดยอด
       const updPreview = () => {
         const cost = row.price;
+        const netName = netEl.selectedOptions[0]?.textContent || netEl.value;
         let sell = null;
+        let item = '';
+        let face = null;
         if (kindEl.value === 'topup') {
           const v = faceEl.value.trim();
-          if (/^\d{1,6}$/.test(v) && Number(v) > 0) sell = afterDiscount(Number(v) * 100, discountBp(netEl.value));
+          if (/^\d{1,6}$/.test(v) && Number(v) > 0) {
+            face = Number(v);
+            sell = afterDiscount(face * 100, discountBp(netEl.value));
+            item = `เติมเงิน ${netName} ${face.toLocaleString('th-TH')} บาท`;
+          }
         } else {
-          sell = products.find((p) => String(p.id) === prodEl.value)?.price ?? null;
+          const p = products.find((x) => String(x.id) === prodEl.value);
+          if (p) { sell = p.price; item = `แพ็กเกจ ${netName} "${p.name}"`; }
         }
-        if (sell === null || cost === null || cost === undefined) { preview.textContent = 'ระบุยอด/แพ็กเกจเพื่อดูราคาขายและกำไร'; return; }
+        current = { sell, item };
+        if (sell === null || cost === null || cost === undefined) {
+          preview.innerHTML = html`<span class="muted">ระบุยอด/แพ็กเกจ เพื่อดูว่าลูกค้าจ่ายเท่าไร และ ${provLabel} จะส่งบริการ "${svc}" ให้ (ต้นทุน ฿${money(cost)})</span>`.toString();
+          return;
+        }
         const profit = sell - cost;
-        preview.innerHTML = html`ราคาขายที่ร้านนี้ <b>${baht(sell)}</b> บาท · ต้นทุน ${baht(cost)} · กำไร <b class="${profit < 0 ? 'text-danger' : ''}">${baht(profit)}</b> บาท${profit < 0 ? ' — ขาดทุน! เปิดใช้ไม่ได้' : ''}`.toString();
+        const mp = sell > 0 ? Math.round((profit * 1000) / sell) / 10 : 0;
+        // ชื่อบริการระบุยอดเป็นตัวเลขไม่ตรงกับยอดที่เลือก → เตือนทันที (เซิร์ฟเวอร์ตรวจซ้ำตอนบันทึก)
+        const nums = (String(row.service_name || '').match(/\d{1,5}/g) || []).map(Number);
+        const nameMismatch = face !== null && nums.length === 1 && nums[0] !== face;
+        preview.innerHTML = html`<div class="map-live">ลูกค้าจ่าย <b class="num">฿${baht(sell)}</b> → ${provLabel} ส่งบริการ <b>"${svc}"</b> (ต้นทุน <b class="num">฿${money(cost)}</b>)</div>
+          <div class="small">${item} · กำไร <b class="${profit < 0 ? 'text-danger' : ''}">${baht(profit)}</b> บาท (${pctText(mp)})
+            ${profit < 0 ? html`<span class="text-danger bold"> — ขาดทุน! เปิดใช้ไม่ได้</span>` : ''}
+            ${profit >= 0 && mp > HIGH_MARGIN_PCT ? html`<span class="text-warning bold"> — กำไรสูงผิดปกติ ตรวจว่าบริการให้ยอดเต็มตามที่ลูกค้าจ่าย</span>` : ''}</div>
+          ${nameMismatch ? html`<div class="small text-danger bold">⚠ ชื่อบริการระบุ ${nums[0].toLocaleString('th-TH')} แต่คุณเลือกยอด ${face.toLocaleString('th-TH')} บาท — ลูกค้าจะจ่าย ${face.toLocaleString('th-TH')} บาทแต่อาจได้ไม่ครบ</div>` : ''}`.toString();
+        preview.classList.toggle('is-bad', profit < 0 || nameMismatch);
       };
       const syncKind = () => {
         const pkg = kindEl.value === 'package';
@@ -378,6 +477,7 @@ function mapDialog(name, row, shop) {
       const submit = (e) => {
         e?.preventDefault();
         clearFieldErrors(form);
+        showErr('');
         const kind = kindEl.value;
         const body = { service_id: row.service_id, kind, network_code: netEl.value, enabled: form.querySelector('[name="enabled"]').checked };
         if (kind === 'topup') {
@@ -387,13 +487,29 @@ function mapDialog(name, row, shop) {
           if (!prodEl.value) { showFieldError(form, { message: 'กรุณาเลือกแพ็กเกจในระบบที่ตรงกับบริการนี้', details: { field: 'product_id' } }); return; }
           body.product_id = Number(prodEl.value);
         }
+        const url = `/api/admin/providers/${encodeURIComponent(name)}/mappings`;
         withLoading(btn, async () => {
           try {
-            const m = await api.post(`/api/admin/providers/${encodeURIComponent(name)}/mappings`, body);
+            let m;
+            try {
+              m = await api.post(url, body);
+            } catch (err) {
+              if (err.code !== 'MAPPING_CHECK') throw err;
+              // ดูไม่ตรงกัน (เช่น ชื่อบริการบอก 50 บาท แต่จับคู่ยอด 100) → แสดงคำเตือนให้ตัดสินใจ แล้วส่งข้อมูลเดิม + confirm
+              const ok = await confirmMappingCheck(err, { pay: current.sell, item: current.item, provider: provLabel, service: svc, cost: row.price }, { action: body.enabled ? 'บันทึกและเปิดใช้' : 'บันทึก' });
+              if (!ok) return;
+              m = await api.post(url, { ...body, confirm: true });
+            }
             toast(`บันทึกการจับคู่แล้ว${m.enabled ? ' (เปิดใช้)' : ' (ปิดไว้ — เปิดใช้ได้ที่ตารางการจับคู่)'}`, 'success', 5000);
             close(true);
           } catch (err) {
-            if (!showFieldError(form, err)) toastError(err); // 400 = ขาดทุน / ข้อมูลไม่ถูกต้อง
+            if (err.code === 'SERVICE_ALREADY_MAPPED') {
+              // บริการเดียวจับคู่ได้รายการเดียว — ไม่มีการข้าม ต้องลบ/แก้การจับคู่เดิมก่อน
+              const ex = existingText(err.details?.existing);
+              showErr(`${err.message}${ex && !err.message.includes(ex) ? ` (ใช้อยู่กับ: ${ex})` : ''}`);
+              return;
+            }
+            if (!showFieldError(form, err)) showErr(err.message || 'บันทึกไม่สำเร็จ'); // 400 = ขาดทุน / ข้อมูลไม่ถูกต้อง
           }
         });
       };
@@ -460,7 +576,7 @@ async function mapTab(box, name, reload, lastSync) {
     api.get('/api/admin/shops').catch(() => []),
   ]);
   const shop = shops.find((s) => s.code === name) || null;
-  const label = d.provider?.label || name;
+  const label = shortLabel(d.provider || { name });
   box.innerHTML = html`
     <section class="card">
       <div class="card-head"><h3>จับคู่บริการ ${label}</h3><button type="button" class="btn primary sm" data-sync>${icon('refresh')}ดึงรายการ</button></div>
@@ -469,7 +585,10 @@ async function mapTab(box, name, reload, lastSync) {
       <div data-sync-result>${lastSync ? syncSummary(lastSync) : ''}</div>
       ${gapsHtml(d.topup_gaps)}
     </section>
-    <section class="card flush"><div class="card-head" style="padding:16px 18px 0"><h3>การจับคู่ (${d.mappings.length})</h3></div>${mappingsTable(d.mappings)}</section>
+    <section class="card flush"><div class="card-head" style="padding:16px 18px 0"><h3>การจับคู่ (${d.mappings.length})</h3></div>
+      <div style="padding:0 18px">${mappingAlerts(d.mappings)}</div>
+      <p class="xsmall muted" style="padding:6px 18px 0;margin:0">กำไร % ใต้ตัวเลขกำไร: สูงกว่า ${HIGH_MARGIN_PCT}% จะมีเครื่องหมาย ⚠ — ตรวจว่าบริการให้ยอด/แพ็กเกจเต็มตามที่ลูกค้าจ่าย</p>
+      ${mappingsTable(d.mappings)}</section>
     <section class="card flush">
       <div class="card-head" style="padding:16px 18px 0"><h3>บริการจาก ${label} (${d.catalog.length})</h3>
         <input class="input" data-filter placeholder="ค้นหา service id / ชื่อ" style="max-width:260px;min-height:38px"></div>
@@ -494,7 +613,7 @@ async function mapTab(box, name, reload, lastSync) {
   const rowOf = (id) => d.catalog.find((r) => String(r.service_id) === String(id));
   on(box, 'click', '[data-map]', async (e, b) => {
     const row = rowOf(b.dataset.map);
-    if (row && (await mapDialog(name, row, shop))) await reload();
+    if (row && (await mapDialog(name, label, row, shop))) await reload();
   });
   on(box, 'click', '[data-new-product]', async (e, b) => {
     const row = rowOf(b.dataset.newProduct);
@@ -505,15 +624,28 @@ async function mapTab(box, name, reload, lastSync) {
     if (!m) return;
     const want = input.checked;
     if (want && m.loss) { input.checked = false; toast('ต้นทุนสูงกว่าราคาขาย — เปิดใช้ไม่ได้ (จะขาดทุน)', 'error'); return; }
+    const url = `/api/admin/providers/${encodeURIComponent(name)}/mappings/${m.id}`;
     input.disabled = true;
     try {
-      await api.put(`/api/admin/providers/${encodeURIComponent(name)}/mappings/${m.id}`, { enabled: want });
+      try {
+        await api.put(url, { enabled: want });
+      } catch (err) {
+        if (err.code !== 'MAPPING_CHECK' || !want) throw err;
+        // เปิดใช้การจับคู่ที่ดูไม่ตรงกัน → แสดงคำเตือนให้ตัดสินใจก่อน (ลูกค้าจะเลือกยอดนี้ได้ทันทีหลังเปิด)
+        const ok = await confirmMappingCheck(err, { pay: m.sell_price, item: ourItem(m), provider: label, service: serviceName(m), cost: m.cost }, { action: 'เปิดใช้' });
+        if (!ok) { input.checked = false; input.disabled = false; return; }
+        await api.put(url, { enabled: true, confirm: true });
+      }
       toast(want ? 'เปิดใช้การจับคู่แล้ว — ลูกค้าเลือกยอด/แพ็กเกจนี้ที่ร้านนี้ได้' : 'ปิดการจับคู่แล้ว', 'success');
       await reload();
     } catch (err) {
       input.checked = !want;
       input.disabled = false;
-      toastError(err); // 400 = จะขาดทุน / บริการใช้ไม่ได้แล้ว
+      // 400 = จะขาดทุน / บริการใช้ไม่ได้แล้ว · 409 SERVICE_ALREADY_MAPPED = บริการนี้ใช้กับรายการอื่นอยู่ (ต้องลบอันเดิมก่อน)
+      if (err.code === 'SERVICE_ALREADY_MAPPED') {
+        const ex = existingText(err.details?.existing);
+        toast(`${err.message}${ex && !err.message.includes(ex) ? ` (ใช้อยู่กับ: ${ex})` : ''}`, 'error', 9000);
+      } else toastError(err);
     }
   });
   on(box, 'click', '[data-map-del]', async (e, b) => {

@@ -94,7 +94,12 @@ const httpMessage = (status) => (status >= 500
   ? `ระบบขัดข้องชั่วคราว (HTTP ${status}) กรุณาลองใหม่อีกครั้ง`
   : status === 429 ? 'ทำรายการถี่เกินไป กรุณารอสักครู่แล้วลองใหม่' : `เกิดข้อผิดพลาด (HTTP ${status})`);
 
-/** timeout (ms): เลิกรอเมื่อเกินเวลา → แจ้งเป็น NETWORK (ไม่รู้ผล) ให้ส่งซ้ำด้วย idempotency key เดิมได้ */
+const TIMEOUT_MESSAGE = 'เซิร์ฟเวอร์ตอบช้าเกินไป (หมดเวลารอ) กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่';
+
+/**
+ * timeout (ms): เลิกรอเมื่อเกินเวลา → แจ้งเป็น NETWORK (ไม่รู้ผล) ให้ส่งซ้ำด้วย idempotency key เดิมได้
+ * (หมดเวลา → err.details.timeout = true และข้อความบอกว่าหมดเวลารอ)
+ */
 export async function api(method, path, body, { signal, timeout, retried = false } = {}) {
   const headers = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -102,6 +107,8 @@ export async function api(method, path, body, { signal, timeout, retried = false
   const ctrl = timeout ? new AbortController() : null;
   const timer = ctrl ? setTimeout(() => ctrl.abort(), timeout) : null;
   if (ctrl && signal) signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+  // หมดเวลาที่เราตั้งเอง (ไม่ใช่ผู้เรียกสั่งยกเลิก)
+  const timedOut = () => Boolean(ctrl?.signal.aborted) && !signal?.aborted;
   let res;
   let json = null;
   try {
@@ -109,12 +116,15 @@ export async function api(method, path, body, { signal, timeout, retried = false
       res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: 'same-origin', signal: ctrl ? ctrl.signal : signal });
     } catch (e) {
       if (e.name === 'AbortError' && signal?.aborted) throw e;
+      if (timedOut()) throw new ApiError('NETWORK', TIMEOUT_MESSAGE, 0, { timeout: true });
       throw new ApiError('NETWORK', 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่');
     }
     try { json = await res.json(); } catch { /* ไม่ใช่ JSON (หรือหมดเวลาระหว่างอ่าน) */ }
   } finally {
     if (timer) clearTimeout(timer);
   }
+  // หมดเวลาระหว่างอ่านคำตอบ → ไม่รู้ผล (เหมือนเน็ตหลุด) ไม่ใช่ "HTTP 200 ผิดพลาด"
+  if (!json && timedOut()) throw new ApiError('NETWORK', TIMEOUT_MESSAGE, res?.status || 0, { timeout: true });
   if (!res.ok || !json || json.ok === false) {
     const err = json?.error;
     // 401 ของขั้นตอนเข้าสู่ระบบ (รหัสผ่าน/รหัส 2 ชั้นผิด) ไม่ใช่เซสชันหมดอายุ
@@ -211,23 +221,67 @@ export const statusBadge = (status, label) => {
 
 export const NETWORK_COLORS = { AIS: '#5ba829', TRUE: '#e4002b', DTAC: '#0097d8' };
 export const NETWORK_NAMES = { AIS: 'AIS', TRUE: 'True', DTAC: 'dtac' };
-export const netBadge = (code, name) =>
-  html`<span class="net-badge" style="--net:${raw(NETWORK_COLORS[code] || '#777')}">${name || NETWORK_NAMES[code] || code}</span>`;
+
+const inkCache = new Map();
+const relLum = (rgb) => {
+  const f = (c) => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; };
+  return 0.2126 * f(rgb[0]) + 0.7152 * f(rgb[1]) + 0.0722 * f(rgb[2]);
+};
+/**
+ * สีแบรนด์ที่เข้มขึ้นพอให้อ่านง่าย (WCAG AA): ใช้เป็นพื้นหลังของตัวอักษรสีขาว หรือเป็นสีตัวอักษรบนพื้นสีอ่อน
+ * เช่น เขียว AIS (#5ba829) ตัวอักษรขาวบนพื้นนี้อ่านยาก (≈3:1) → ได้สีเขียวเข้มที่ ≥ 5:1
+ */
+export function inkOf(color) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(color || '').trim());
+  if (!m) return '#4b5263';
+  const key = m[1].toLowerCase();
+  if (inkCache.has(key)) return inkCache.get(key);
+  let rgb = [0, 2, 4].map((i) => parseInt(key.slice(i, i + 2), 16));
+  // เผื่อพื้นสีอ่อน (tint) ที่สว่างน้อยกว่าสีขาวเล็กน้อย → ตั้งเป้า 5.2:1 เทียบกับสีขาว
+  for (let i = 0; i < 40 && 1.05 / (relLum(rgb) + 0.05) < 5.2; i++) rgb = rgb.map((c) => c * 0.93);
+  const out = `#${rgb.map((c) => Math.round(c).toString(16).padStart(2, '0')).join('')}`;
+  inkCache.set(key, out);
+  return out;
+}
+
+export const netBadge = (code, name) => {
+  const c = NETWORK_COLORS[code] || '#777777';
+  return html`<span class="net-badge" style="--net:${raw(c)};--net-ink:${raw(inkOf(c))}">${name || NETWORK_NAMES[code] || code}</span>`;
+};
 
 // ───────────── Toast ─────────────
-let toastRoot = null;
-export function toast(message, type = 'info', ms = 3800) {
-  if (!toastRoot) {
-    toastRoot = document.createElement('div');
-    toastRoot.className = 'toasts';
-    toastRoot.setAttribute('role', 'status');
-    toastRoot.setAttribute('aria-live', 'polite');
-    document.body.appendChild(toastRoot);
+/**
+ * ที่วาง toast: หน้าต่าง (<dialog>) ที่เปิดอยู่บนสุด — ถ้าวางไว้นอกหน้าต่าง ฉากหลังของหน้าต่างจะบังจนมองไม่เห็นข้อความ
+ */
+function toastHost() {
+  const open = Array.from(document.querySelectorAll('dialog[open]')).filter((d) => {
+    try { return d.matches(':modal'); } catch { return true; } // เบราว์เซอร์เก่าไม่รู้จัก :modal
+  });
+  return open.length ? open[open.length - 1] : document.body;
+}
+function toastRootIn(host) {
+  let root = Array.from(host.children).find((c) => c.classList.contains('toasts'));
+  if (!root) {
+    root = document.createElement('div');
+    root.className = 'toasts';
+    root.setAttribute('role', 'status');
+    root.setAttribute('aria-live', 'polite');
+    host.appendChild(root);
   }
+  return root;
+}
+/** หน้าต่างกำลังปิด → ย้าย toast ที่ยังแสดงอยู่ออกมาที่หน้าเว็บ (ไม่หายไปพร้อมหน้าต่าง) */
+function rehomeToasts(dlg) {
+  const inner = Array.from(dlg.children).find((c) => c.classList.contains('toasts'));
+  if (!inner || !inner.childElementCount) return;
+  const root = toastRootIn(toastHost());
+  while (inner.firstChild) root.appendChild(inner.firstChild);
+}
+export function toast(message, type = 'info', ms = 3800) {
   const el = document.createElement('div');
   el.className = `toast ${type}`;
   el.textContent = message;
-  toastRoot.appendChild(el);
+  toastRootIn(toastHost()).appendChild(el);
   setTimeout(() => {
     el.classList.add('out');
     setTimeout(() => el.remove(), 220);
@@ -250,14 +304,22 @@ export function modal({ title, body, foot, wide = false, onMount, dismissible = 
       ${foot ? html`<div class="modal-foot">${foot}</div>` : ''}`);
     document.body.appendChild(dlg);
     let result;
-    const close = (value) => {
-      result = value;
-      if (dlg.open) dlg.close();
-    };
-    dlg.addEventListener('close', () => {
+    let done = false;
+    // จบหน้าต่างทันทีเมื่อปิด (ไม่รอ event "close" ของเบราว์เซอร์ ซึ่งบางสถานะ เช่น แท็บอยู่เบื้องหลัง อาจมาช้ามาก)
+    const finish = () => {
+      if (done) return;
+      done = true;
+      rehomeToasts(dlg); // ข้อความที่แจ้งก่อนปิดหน้าต่าง (เช่น error) ต้องยังเห็นต่อ
       dlg.remove();
       resolve(result);
-    });
+    };
+    const close = (value) => {
+      if (done) return;
+      result = value;
+      if (dlg.open) dlg.close();
+      finish();
+    };
+    dlg.addEventListener('close', finish); // ปิดด้วยปุ่ม Esc / วิธีอื่นของเบราว์เซอร์
     dlg.addEventListener('cancel', (e) => { if (!dismissible) e.preventDefault(); });
     dlg.addEventListener('click', (e) => {
       if (e.target.closest('[data-close]')) close(undefined);
@@ -462,13 +524,32 @@ export async function compressImage(file, { maxDim = 1600, quality = 0.85 } = {}
   }
 }
 
-export async function copyText(text) {
+/** คัดลอกข้อความ (เว็บที่ไม่ได้เปิดผ่าน https / เบราว์เซอร์เก่า ใช้วิธีสำรอง) → คืน true ถ้าสำเร็จ */
+export async function copyText(text, okMessage = 'คัดลอกแล้ว') {
+  let ok = false;
   try {
     await navigator.clipboard.writeText(text);
-    toast('คัดลอกแล้ว', 'success', 1800);
+    ok = true;
   } catch {
-    toast('คัดลอกไม่สำเร็จ', 'error');
+    const prev = document.activeElement;
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;';
+      toastHost().appendChild(ta); // ในหน้าต่างที่เปิดอยู่ (นอกหน้าต่างเลือกข้อความไม่ได้)
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      ok = document.execCommand('copy');
+      ta.remove();
+    } catch {
+      ok = false;
+    }
+    try { prev?.focus?.({ preventScroll: true }); } catch { /* ignore */ }
   }
+  if (ok) toast(okMessage, 'success', 2200);
+  else toast('คัดลอกไม่สำเร็จ', 'error');
+  return ok;
 }
 
 /** หน่วงการ poll สถานะรายการ: เร็วช่วงแรก แล้วค่อยๆ ช้าลง */

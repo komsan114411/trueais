@@ -2,7 +2,7 @@
 import { html, raw, $, setHTML, baht } from '../lib.js';
 import { state } from './state.js';
 import { icon } from './icons.js';
-import { alertBox, initial } from './ui.js';
+import { alertBox, initial, supportLinks } from './ui.js';
 
 const DESKTOP_NAV = [
   { path: '/', label: 'หน้าแรก', icon: 'home' },
@@ -82,8 +82,7 @@ function renderFooter() {
   setHTML($('#footer'), html`<div class="site-footer"><div class="container">
     <span>© ${new Date().getFullYear() + 543} ${s.site_name || ''} · เติมเงินมือถือ & แพ็กเกจเน็ต AIS • True • dtac</span>
     <span class="row wrap" style="--gap:14px">
-      ${s.support_line ? html`<span class="row" style="--gap:6px">${icon('headset', 16)} LINE: ${s.support_line}</span>` : ''}
-      ${s.support_phone ? html`<span class="row" style="--gap:6px">${icon('phone', 16)} โทร: ${s.support_phone}</span>` : ''}
+      ${supportLinks(s) ? html`<span class="row wrap support-links" style="--gap:6px">${icon('headset', 16)} ติดต่อร้าน: ${supportLinks(s)}</span>` : ''}
     </span>
   </div></div>`);
 }

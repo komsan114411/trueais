@@ -40,7 +40,7 @@ export async function render(el, params, query) {
   ];
   el.innerHTML = html`
     <form class="card filter-card toolbar" data-filter>
-      <div class="field"><label>ช่วงเวลาด่วน</label><div class="chips">${presets.map(([l, a, b]) => html`<button type="button" class="chip sm ${f.from === a && f.to === b ? 'active' : ''}" data-from="${a}" data-to="${b}">${l}</button>`)}</div></div>
+      <div class="field wide-sm"><label>ช่วงเวลาด่วน</label><div class="chips">${presets.map(([l, a, b]) => html`<button type="button" class="chip sm ${f.from === a && f.to === b ? 'active' : ''}" data-from="${a}" data-to="${b}">${l}</button>`)}</div></div>
       <div class="field"><label>ตั้งแต่</label><input class="input" type="date" name="from" value="${f.from}"></div>
       <div class="field"><label>ถึง</label><input class="input" type="date" name="to" value="${f.to}"></div>
       <div class="field"><label>จัดกลุ่ม</label><select class="select" name="group">${GROUPS.map(([k, l]) => opt(k, l, f.group))}</select></div>

@@ -1,26 +1,30 @@
 // เติมเงินเข้ากระเป๋า: ตรวจสลิป → อนุมัติ / ไม่อนุมัติ
 import {
   html, raw, api, baht, dateTime, dateTimeSec, phoneFmt, modal, promptDialog, confirmDialog, toast, toastError, withLoading, on, qs,
-  showFieldError, clearFieldErrors,
+  showFieldError, clearFieldErrors, session,
 } from '../lib.js';
-import { icon, depositBadge, pagerHtml, bindPager, setQuery, emptyRow, store, registry } from './common.js';
+import { icon, depositBadge, pagerHtml, bindPager, setQuery, emptyRow, store, registry, getData } from './common.js';
 
 const TABS = [
   ['waiting', 'รอตรวจสลิป'],
   ['pending', 'รอดำเนินการทั้งหมด'],
   ['approved', 'อนุมัติแล้ว'],
   ['rejected', 'ไม่อนุมัติ'],
-  ['cancelled', 'ยกเลิก'],
+  ['cancelled', 'ยกเลิก / หมดเวลา'],
   ['all', 'ทั้งหมด'],
 ];
 const METHOD = { promptpay: 'พร้อมเพย์', bank: 'โอนเข้าบัญชี' };
-const slipUrl = (id) => `/api/admin/deposits/${encodeURIComponent(id)}/slip`;
+// ใส่รหัสสลิป (slip_ver) ใน URL: ลูกค้าเปลี่ยนสลิป = URL ใหม่ → เบราว์เซอร์ไม่แสดงรูปเก่าจากแคช
+const slipUrl = (id, ver) => `/api/admin/deposits/${encodeURIComponent(id)}/slip${ver ? `?v=${encodeURIComponent(ver)}` : ''}`;
+const isMine = (d) => Boolean(session.user && Number(d.user_id) === Number(session.user.id));
+// ปิดไปแล้วแต่ยังอนุมัติได้ (หมดเวลา / ปฏิเสธ / ยกเลิก — เงินเข้าบัญชีจริงภายหลัง)
+const isClosed = (d) => d.status === 'cancelled' || d.status === 'rejected';
 
-export function openSlip(id) {
+export function openSlip(id, ver) {
   return modal({
     title: `สลิปรายการเติมเงิน #${id}`,
     wide: true,
-    body: html`<img class="slip-full" src="${slipUrl(id)}" alt="สลิปการโอนเงิน รายการ #${id}">
+    body: html`<img class="slip-full" src="${slipUrl(id, ver)}" alt="สลิปการโอนเงิน รายการ #${id}">
       <p class="small muted center mt-2 mb-0">ตรวจชื่อผู้โอน ยอดเงิน (รวมเศษสตางค์) และเวลา ให้ตรงกับยอดเข้าบัญชีจริงก่อนอนุมัติ</p>`,
   });
 }
@@ -30,12 +34,13 @@ const toSatang = (s) => {
   return Number(whole) * 100 + Number(`${frac}00`.slice(0, 2));
 };
 
-/** คำเตือนจากเซิร์ฟเวอร์: สลิปซ้ำกับรายการที่เคยปฏิเสธ/ยกเลิก · ยอดซ้ำกับรายการอื่น (ตรวจยอดโอนให้ตรงรายการ) */
+/** คำเตือนจากเซิร์ฟเวอร์: สลิปซ้ำกับรายการที่เคยปฏิเสธ/ยกเลิก · ยอดซ้ำกับรายการอื่น · ลูกค้าเปลี่ยนสลิป */
 function dupWarnings(d, { inDialog = false } = {}) {
   const link = (id) => html`<a href="#/deposits?tab=all&q=${id}" ${inDialog ? raw('data-close') : ''}>#${id}</a>`;
   const out = [];
   if (d.slip_dup_of) out.push(html`<div class="text-danger bold">⚠️ สลิปเหมือนรายการ ${link(d.slip_dup_of)} ที่เคยถูกปฏิเสธ/ยกเลิก</div>`);
   if (d.amount_dup_of) out.push(html`<div class="text-warning bold">ยอดเดียวกับรายการ ${link(d.amount_dup_of)} — ตรวจยอดโอนให้ตรงรายการ</div>`);
+  if (d.slip_count > 1) out.push(html`<div class="text-warning">ลูกค้าเปลี่ยนสลิปแล้ว (ใบที่ ${d.slip_count}) — ตรวจใบล่าสุด</div>`);
   return out.length ? html`<div class="small stack" style="--gap:2px">${out}</div>` : '';
 }
 
@@ -50,22 +55,36 @@ async function askNote({ title, label, value = '', confirmText }) {
   }
 }
 
+/** แจ้งเรื่องสำคัญแบบต้องกดรับทราบ (ไม่หายไปเองเหมือน toast) */
+const notice = (title, body) => modal({ title, body: html`<p class="mb-0">${body}</p>`, foot: html`<button class="btn primary" data-close>รับทราบ</button>` });
+
+/** คืน true เมื่อควรโหลดรายการใหม่ (อนุมัติแล้ว / ข้อมูลเปลี่ยน) */
 async function approveFlow(d) {
+  if (isMine(d)) {
+    toast('อนุมัติรายการเติมเงินของบัญชีตัวเองไม่ได้ — ให้แอดมินคนอื่นตรวจ', 'error', 6000);
+    return false;
+  }
+  const closed = isClosed(d);
   const result = await modal({
     title: `อนุมัติเติมเงิน #${d.id}`,
     body: html`<form class="stack" data-form novalidate>
       <div class="alert warning"><span class="alert-icon">!</span><div>ตรวจสอบว่ามี <b>เงินเข้าบัญชีจริง ${baht(d.amount)} บาท</b> ก่อนอนุมัติ — อนุมัติแล้วเงินจะเข้ากระเป๋าลูกค้าทันทีและยกเลิกไม่ได้ (ต้องปรับยอดเอง)</div></div>
-      ${d.slip_dup_of || d.amount_dup_of ? html`<div class="alert danger"><span class="alert-icon">!</span><div class="grow">${dupWarnings(d, { inDialog: true })}</div></div>` : ''}
-      ${d.has_slip ? '' : html`<div class="alert danger"><span class="alert-icon">!</span><div>รายการนี้ยังไม่มีสลิป — อนุมัติได้เฉพาะเมื่อตรวจพบยอดเงินเข้าบัญชีแล้ว (ต้องยืนยันอีกครั้งพร้อมหมายเหตุ)</div></div>`}
+      ${closed ? html`<div class="alert danger"><span class="alert-icon">!</span><div><b>รายการนี้${d.status === 'rejected' ? 'ถูกปฏิเสธ' : d.expired ? 'หมดเวลา (ไม่แนบสลิปใน 48 ชม.)' : 'ถูกยกเลิก'}ไปแล้ว</b>${d.admin_note ? html` — ${d.admin_note}` : ''}
+        <div class="small">อนุมัติย้อนหลังได้เมื่อตรวจพบเงินเข้าบัญชีจริงเท่านั้น (ระบบจะให้ยืนยันอีกครั้งพร้อมหมายเหตุ)</div></div></div>` : ''}
+      ${d.slip_dup_of || d.amount_dup_of || d.slip_count > 1 ? html`<div class="alert danger"><span class="alert-icon">!</span><div class="grow">${dupWarnings(d, { inDialog: true })}</div></div>` : ''}
+      ${d.has_slip
+        ? html`<button type="button" class="slip-peek" data-peek title="แตะเพื่อดูภาพเต็ม"><img src="${slipUrl(d.id, d.slip_ver)}" alt="สลิปที่กำลังจะอนุมัติ #${d.id}"><span class="small">สลิปที่คุณกำลังอนุมัติ — แตะเพื่อขยาย</span></button>`
+        : html`<div class="alert danger"><span class="alert-icon">!</span><div>รายการนี้ยังไม่มีสลิป — อนุมัติได้เฉพาะเมื่อตรวจพบยอดเงินเข้าบัญชีแล้ว (ต้องยืนยันอีกครั้งพร้อมหมายเหตุ)</div></div>`}
       <dl class="dl"><dt>ลูกค้า</dt><dd>${d.user_name} ${d.user_phone ? phoneFmt(d.user_phone) : ''}</dd><dt>ยอดที่แจ้ง</dt><dd>${baht(d.amount)} บาท</dd><dt>ช่องทาง</dt><dd>${METHOD[d.method] || d.method}</dd><dt>เวลาโอน</dt><dd>${dateTimeSec(d.transfer_at)}</dd></dl>
-      <div class="field"><label>ยอดที่จะเติมเข้ากระเป๋า (บาท)</label><input class="input" name="amount" inputmode="decimal" value="${(d.amount / 100).toFixed(2)}"><div class="help">แก้ได้ถ้ายอดที่โอนจริงไม่ตรงกับที่แจ้ง (ต้องระบุเหตุผลในหมายเหตุ)</div><div class="error-text"></div></div>
-      <div class="field"><label>หมายเหตุ (บังคับเมื่อแก้ยอด)</label><input class="input" name="note" maxlength="300" placeholder="เช่น ตรวจยอดเข้า KBank แล้ว"><div class="error-text"></div></div>
+      <div class="field"><label for="ap-amount">ยอดที่จะเติมเข้ากระเป๋า (บาท)</label><input class="input" id="ap-amount" name="amount" inputmode="decimal" value="${(d.amount / 100).toFixed(2)}"><div class="help">แก้ได้ถ้ายอดที่โอนจริงไม่ตรงกับที่แจ้ง (ต้องระบุเหตุผลในหมายเหตุ)</div><div class="error-text"></div></div>
+      <div class="field"><label for="ap-note">หมายเหตุ (บังคับเมื่อแก้ยอด)</label><input class="input" id="ap-note" name="note" maxlength="300" placeholder="เช่น ตรวจยอดเข้า KBank แล้ว"><div class="error-text"></div></div>
     </form>`,
     foot: html`<button class="btn" data-close>ยกเลิก</button><button class="btn success" data-ok>${icon('check')}อนุมัติและเติมเงิน</button>`,
     onMount: (dlg, close) => {
       const form = dlg.querySelector('[data-form]');
       const amountInput = form.querySelector('[name="amount"]');
       const noteInput = form.querySelector('[name="note"]');
+      form.querySelector('[data-peek]')?.addEventListener('click', () => openSlip(d.id, d.slip_ver));
       const submit = (e) => {
         e?.preventDefault();
         clearFieldErrors(form);
@@ -98,14 +117,30 @@ async function approveFlow(d) {
     });
     if (!ok) return false;
   }
-  const body = { amount: result.amount, note: result.note };
-  // ส่งได้ไม่เกิน 3 รอบ: ปกติ → (ไม่มีสลิป: ยืนยัน + หมายเหตุ) → (เติมเกินที่แจ้ง: ยืนยัน)
+  // slip_ver = สลิปที่แอดมินเห็นอยู่ — ลูกค้าเปลี่ยนสลิประหว่างนั้น เซิร์ฟเวอร์จะไม่ให้อนุมัติ (SLIP_CHANGED)
+  const body = { amount: result.amount, note: result.note, slip_ver: d.slip_ver ?? undefined };
+  // ส่งซ้ำได้ตามขั้นตอน: ปกติ → (ปิดไปแล้ว: ยืนยัน + หมายเหตุ) → (ไม่มีสลิป: ยืนยัน + หมายเหตุ) → (เติมเกินที่แจ้ง: ยืนยัน)
   for (;;) {
     try {
       const r = await api.post(`/api/admin/deposits/${d.id}/approve`, body);
-      toast(`อนุมัติแล้ว เติม ${baht(r.deposit.credited_amount ?? d.amount)} บาท ยอดคงเหลือลูกค้า ${baht(r.balance)} บาท`, 'success', 5000);
+      toast(`อนุมัติแล้ว เติม ${baht(r.deposit?.credited_amount ?? satang)} บาท ยอดคงเหลือลูกค้า ${baht(r.balance)} บาท`, 'success', 5000);
       return true;
     } catch (err) {
+      if (err.code === 'SLIP_CHANGED') {
+        await notice('ลูกค้าเปลี่ยนสลิปแล้ว — ยังไม่ได้อนุมัติ', `${err.message} · ระบบโหลดรายการใหม่ให้แล้ว กรุณาเปิดดูสลิปใบล่าสุดของรายการ #${d.id} แล้วตรวจยอดเงินเข้าบัญชีอีกครั้ง`);
+        return true; // โหลดรายการใหม่ (ได้สลิปใบล่าสุด)
+      }
+      if (err.code === 'DEPOSIT_CLOSED' && !body.reopen) {
+        const why = await askNote({
+          title: 'อนุมัติรายการที่ปิดไปแล้ว',
+          label: `${err.message} · ${d.user_name} · เติม ${baht(satang)} บาท — อนุมัติเฉพาะเมื่อเห็นยอดเงินนี้เข้าบัญชีร้านจริง · หมายเหตุ (บังคับ เช่น เวลาและธนาคารที่เงินเข้า)`,
+          value: body.note,
+          confirmText: `เงินเข้าจริง — อนุมัติ ${baht(satang)} บาท`,
+        });
+        if (why === null) return false;
+        Object.assign(body, { reopen: true, note: why });
+        continue;
+      }
       if (err.code === 'NO_SLIP' && !body.no_slip) {
         const why = await askNote({
           title: 'อนุมัติแบบไม่มีสลิป',
@@ -129,7 +164,7 @@ async function approveFlow(d) {
         body.confirm_over = true;
         continue;
       }
-      throw err;
+      throw err; // SELF_ACTION / ตรวจไปแล้ว / อื่นๆ → แสดงข้อความจากเซิร์ฟเวอร์
     }
   }
 }
@@ -144,15 +179,19 @@ async function rejectFlow(d) {
     danger: true,
   });
   if (note === null) return false;
+  if (note.length < 3) { toast('กรุณาระบุเหตุผลอย่างน้อย 3 ตัวอักษร', 'error'); return false; }
   await api.post(`/api/admin/deposits/${d.id}/reject`, { note });
   toast('บันทึกไม่อนุมัติแล้ว', 'success');
   return true;
 }
 
+const mineNote = html`<div class="small text-warning">รายการของบัญชีคุณเอง — ให้แอดมินคนอื่นอนุมัติ</div>`;
+
 function card(d) {
+  const mine = isMine(d);
   return html`<article class="card dep-card" data-id="${d.id}">
     ${d.has_slip
-      ? html`<div class="slip" data-slip="${d.id}" title="คลิกเพื่อดูภาพเต็ม"><img loading="lazy" src="${slipUrl(d.id)}" alt="สลิป #${d.id}"></div>`
+      ? html`<button type="button" class="slip" data-slip="${d.id}" data-ver="${d.slip_ver || ''}" title="แตะเพื่อดูภาพเต็ม" aria-label="ดูสลิป #${d.id} ภาพเต็ม"><img loading="lazy" src="${slipUrl(d.id, d.slip_ver)}" alt="สลิป #${d.id}"></button>`
       : html`<div class="slip none">ลูกค้ายังไม่แนบสลิป</div>`}
     <div class="row between"><span class="amount num">฿${baht(d.amount)}</span>${depositBadge(d.status, d.status_label)}</div>
     <div class="small">
@@ -162,27 +201,40 @@ function card(d) {
       ${d.note ? html`<div class="text-2">หมายเหตุลูกค้า: ${d.note}</div>` : ''}
     </div>
     ${dupWarnings(d)}
-    ${d.status === 'pending' ? html`<div class="row">
-      <button class="btn success sm grow" data-approve="${d.id}" title="${d.has_slip ? 'อนุมัติและเติมเงินเข้ากระเป๋า' : 'ลูกค้ายังไม่แนบสลิป — ตรวจยอดเข้าบัญชีก่อนอนุมัติ'}">${icon('check')}อนุมัติ</button>
-      <button class="btn danger sm grow" data-reject="${d.id}">${icon('x')}ไม่อนุมัติ</button>
+    ${d.status === 'pending' ? html`${mine ? mineNote : ''}<div class="row">
+      <button class="btn success grow" data-approve="${d.id}" ${mine ? raw('disabled') : ''} title="${d.has_slip ? 'อนุมัติและเติมเงินเข้ากระเป๋า' : 'ลูกค้ายังไม่แนบสลิป — ตรวจยอดเข้าบัญชีก่อนอนุมัติ'}">${icon('check')}อนุมัติ</button>
+      <button class="btn danger grow" data-reject="${d.id}">${icon('x')}ไม่อนุมัติ</button>
     </div>` : ''}
   </article>`;
 }
 
+function actions(d) {
+  const mine = isMine(d);
+  if (d.status === 'pending') {
+    return html`${mine ? mineNote : ''}<button class="btn success sm" data-approve="${d.id}" ${mine ? raw('disabled') : ''}>อนุมัติ</button> <button class="btn danger sm" data-reject="${d.id}">ไม่อนุมัติ</button>`;
+  }
+  // ปิดไปแล้ว (หมดเวลา / ปฏิเสธ / ยกเลิก) แต่เงินเข้าจริงภายหลัง → อนุมัติย้อนหลังได้ (ต้องยืนยัน + หมายเหตุ)
+  if (isClosed(d) && !mine) {
+    return html`<button class="btn sm" data-approve="${d.id}" title="ใช้เมื่อตรวจพบว่าเงินเข้าบัญชีจริงภายหลัง">${icon('check')}เงินเข้าแล้ว? อนุมัติ</button>`;
+  }
+  return '';
+}
+
+// ตาราง = จอใหญ่ · การ์ด = มือถือ (cards-sm)
 function table(rows) {
-  return html`<div class="table-wrap"><table class="table">
+  return html`<div class="table-wrap"><table class="table cards-sm">
     <thead><tr><th>#</th><th>เวลา</th><th>ลูกค้า</th><th>ช่องทาง</th><th class="num">ยอดแจ้ง</th><th class="num">ยอดที่เติม</th><th>สลิป</th><th>สถานะ</th><th>ผู้ตรวจ / หมายเหตุ</th><th></th></tr></thead>
     <tbody>${rows.length ? rows.map((d) => html`<tr>
-      <td class="mono">${d.id}</td>
-      <td class="nowrap small">${dateTime(d.created_at)}</td>
-      <td><button class="link-btn" data-user="${d.user_id}">${d.user_name}</button><span class="sub">${d.user_phone ? phoneFmt(d.user_phone) : ''}</span></td>
-      <td class="small">${METHOD[d.method] || d.method}</td>
-      <td class="num">${baht(d.amount)}</td>
-      <td class="num">${d.credited_amount !== null && d.credited_amount !== undefined ? baht(d.credited_amount) : '-'}</td>
-      <td>${d.has_slip ? html`<img class="slip-thumb" data-slip="${d.id}" loading="lazy" src="${slipUrl(d.id)}" alt="สลิป #${d.id}">` : html`<span class="muted small">-</span>`}</td>
-      <td>${depositBadge(d.status, d.status_label)}</td>
-      <td class="small">${dupWarnings(d)}${d.reviewer_name || ''}${d.reviewed_at ? html`<span class="sub">${dateTime(d.reviewed_at)}</span>` : ''}${d.admin_note ? html`<span class="sub">${d.admin_note}</span>` : ''}</td>
-      <td class="actions">${d.status === 'pending' ? html`<button class="btn success sm" data-approve="${d.id}">อนุมัติ</button> <button class="btn danger sm" data-reject="${d.id}">ไม่อนุมัติ</button>` : ''}</td>
+      <td class="mono o7" data-label="เลขที่">${d.id}</td>
+      <td class="nowrap small o5" data-label="แจ้งเมื่อ">${dateTime(d.created_at)}</td>
+      <td class="o1"><button class="link-btn" data-user="${d.user_id}">${d.user_name}</button><span class="sub">${d.user_phone ? phoneFmt(d.user_phone) : ''}</span></td>
+      <td class="small o6 r">${METHOD[d.method] || d.method}${d.expired ? html`<span class="sub">หมดเวลา</span>` : ''}</td>
+      <td class="num o3 left-sm bold-sm" data-label="ยอดแจ้ง">${baht(d.amount)}</td>
+      <td class="num o4" data-label="ยอดที่เติม">${d.credited_amount !== null && d.credited_amount !== undefined ? baht(d.credited_amount) : '-'}</td>
+      <td class="o8 r">${d.has_slip ? html`<img class="slip-thumb" data-slip="${d.id}" data-ver="${d.slip_ver || ''}" loading="lazy" src="${slipUrl(d.id, d.slip_ver)}" alt="สลิป #${d.id}" role="button" tabindex="0">` : html`<span class="muted small">ไม่มีสลิป</span>`}</td>
+      <td class="o2 r">${depositBadge(d.status, d.status_label)}</td>
+      <td class="small o9 full">${dupWarnings(d)}${d.reviewer_name || ''}${d.reviewed_at ? html`<span class="sub">${dateTime(d.reviewed_at)}</span>` : ''}${d.admin_note ? html`<span class="sub">${d.admin_note}</span>` : ''}</td>
+      <td class="actions o10 full">${actions(d)}</td>
     </tr>`) : emptyRow(10, 'ไม่มีรายการ')}</tbody></table></div>`;
 }
 
@@ -192,16 +244,24 @@ export async function render(el, params, query) {
   const page = Number(query.page) || 1;
   el.innerHTML = html`
     <div class="page-head"><p class="desc">ลูกค้าโอนเงินผ่านพร้อมเพย์/บัญชีธนาคารแล้วแนบสลิป — ตรวจยอดเข้าบัญชีจริงทุกครั้งก่อนอนุมัติ (ยอดมีเศษสตางค์ช่วยจับคู่สลิปกับรายการ)</p></div>
-    <div class="row between wrap">
+    <div class="dep-head">
       <div class="tabs" role="tablist">${TABS.map(([k, label]) => html`<button class="${k === tab ? 'active' : ''}" data-tab="${k}" role="tab" aria-selected="${k === tab}">${label}${k === 'waiting' && store.dash?.deposits_waiting?.c ? html`<span class="count">${store.dash.deposits_waiting.c}</span>` : ''}</button>`)}</div>
-      <form class="row" data-search><input class="input" name="q" value="${q}" placeholder="ชื่อ/เบอร์ลูกค้า หรือเลขที่" style="min-height:38px;width:220px"><button class="btn sm" type="submit">${icon('search')}ค้นหา</button></form>
+      <form class="dep-search" data-search role="search">
+        <input class="input" name="q" value="${q}" aria-label="ค้นหารายการเติมเงิน" placeholder="ชื่อ / เบอร์ (081-234-5678) / ยอด (100.21) / เลขที่" enterkeyhint="search">
+        <button class="btn" type="submit">${icon('search')}ค้นหา</button>
+      </form>
     </div>
+    ${q ? html`<div class="small muted">ค้นหา "${q}" · ยอดเต็มบาท (เช่น 100) จะเจอทุกเศษสตางค์ 100.00 - 100.99 · <a href="#/deposits?tab=${tab}">ล้างการค้นหา</a></div>` : ''}
     <div data-list><div class="empty"><span class="spinner"></span></div></div>`.toString();
 
   const rowsById = new Map();
-  const load = async () => {
+  let seq = 0;
+  /** background = รีเฟรชอัตโนมัติ (ไม่นับเป็นการใช้งาน) */
+  const load = async ({ background = false } = {}) => {
+    const my = ++seq;
     try {
-      const res = await api.get(`/api/admin/deposits${qs({ status: tab === 'all' ? '' : tab, q, page, pageSize: tab === 'waiting' ? 60 : 30 })}`);
+      const res = await getData(`/api/admin/deposits${qs({ status: tab === 'all' ? '' : tab, q, page, pageSize: tab === 'waiting' ? 60 : 30 })}`, { background });
+      if (my !== seq || !el.isConnected) return;
       rowsById.clear();
       res.rows.forEach((r) => rowsById.set(String(r.id), r));
       const list = el.querySelector('[data-list]');
@@ -213,6 +273,7 @@ export async function render(el, params, query) {
         list.innerHTML = html`<section class="card flush">${table(res.rows)}${pagerHtml(res)}</section>`.toString();
       }
     } catch (err) {
+      if (my !== seq) return;
       el.querySelector('[data-list]').innerHTML = html`<div class="alert danger">${err.message}</div>`.toString();
     }
   };
@@ -224,7 +285,8 @@ export async function render(el, params, query) {
     e.preventDefault();
     setQuery('/deposits', { tab, q: e.target.querySelector('[name="q"]').value.trim() });
   });
-  on(el, 'click', '[data-slip]', (e, s) => openSlip(s.dataset.slip));
+  on(el, 'click', '[data-slip]', (e, s) => openSlip(s.dataset.slip, s.dataset.ver));
+  on(el, 'keydown', 'img[data-slip]', (e, s) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSlip(s.dataset.slip, s.dataset.ver); } });
   on(el, 'click', '[data-user]', (e, b) => registry.openUser?.(Number(b.dataset.user)));
   // ล็อกปุ่มตลอดขั้นตอน (หน้าต่างยืนยัน + ส่งคำสั่ง) กันกดอนุมัติ/ไม่อนุมัติซ้ำ
   on(el, 'click', '[data-approve]', (e, b) => withLoading(b, async () => {
@@ -244,7 +306,7 @@ export async function render(el, params, query) {
   bindPager(el, (p) => setQuery('/deposits', { tab, q, page: p }));
   await load();
   if (tab === 'waiting') {
-    const unsub = store.subscribe(() => load().catch(() => {}));
+    const unsub = store.subscribe((dash, c, meta) => load({ background: Boolean(meta?.background) }).catch(() => {}));
     return () => unsub();
   }
   return undefined;

@@ -9,9 +9,9 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const config = require('../config');
 const db = require('../db');
-const { E } = require('../lib/errors');
+const { E, AppError } = require('../lib/errors');
 const { parseBaht, fmt } = require('../lib/money');
-const { promptPaySvg } = require('../lib/promptpay');
+const { promptPaySvg, formatPromptPayId } = require('../lib/promptpay');
 const { alertAdmin } = require('../lib/notify');
 const settings = require('./settings');
 const wallet = require('./wallet');
@@ -39,6 +39,20 @@ function publicDeposit(d) {
   };
 }
 
+/** ข้อมูลบัญชีรับเงินของร้าน (ให้ลูกค้าโอนเองได้ / คัดลอกเลขได้) */
+function payTo() {
+  const s = settings.all();
+  return { promptpay_id: s.promptpay_id ? formatPromptPayId(s.promptpay_id) : null, promptpay_name: s.promptpay_name || null, bank_accounts: s.bank_accounts || null };
+}
+
+/** ข้อความเมื่อทำอะไรกับรายการที่ปิดไปแล้วไม่ได้ (บอกเหตุผลตามสถานะจริง) */
+function closedMessage(d, who = 'customer') {
+  if (d.status === 'approved') return 'รายการนี้อนุมัติแล้ว';
+  if (d.status === 'rejected') return who === 'admin' ? 'รายการนี้ถูกปฏิเสธไปแล้ว' : 'รายการนี้ไม่ได้รับการอนุมัติ — ถ้าโอนเงินแล้ว กรุณาติดต่อร้านพร้อมสลิป';
+  if (d.expired_at) return who === 'admin' ? 'รายการนี้หมดเวลาแล้ว (ไม่ได้แนบสลิปภายใน 48 ชั่วโมง)' : 'รายการนี้หมดเวลาแล้ว (ไม่ได้แนบสลิปภายใน 48 ชั่วโมง) — ถ้าโอนเงินแล้ว กรุณาติดต่อร้านพร้อมสลิป';
+  return who === 'admin' ? 'ลูกค้ายกเลิกรายการนี้แล้ว' : 'รายการนี้ถูกยกเลิกแล้ว — กรุณาสร้างรายการเติมเงินใหม่';
+}
+
 async function qrFor(amount) {
   const id = settings.get('promptpay_id');
   if (!id) return null;
@@ -61,11 +75,18 @@ async function create(user, { amount, method = 'promptpay', note }) {
   if (satang > s.deposit_max_baht * 100) throw E.validation(`เติมเงินได้สูงสุด ${s.deposit_max_baht.toLocaleString('th-TH')} บาทต่อครั้ง`, { field: 'amount' });
   if (!['promptpay', 'bank'].includes(method)) throw E.validation('ช่องทางไม่ถูกต้อง');
   if (method === 'promptpay' && !s.promptpay_id) throw E.validation('ร้านยังไม่ได้ตั้งค่าพร้อมเพย์ กรุณาเลือกโอนเข้าบัญชีธนาคาร');
+  if (method === 'promptpay' && !(await qrFor(satang))) {
+    // หมายเลขพร้อมเพย์ที่ตั้งไว้สร้าง QR ไม่ได้ → ไม่สร้างรายการที่ลูกค้าจ่ายไม่ได้ + แจ้งแอดมิน
+    alertAdmin('promptpay-invalid', 'หมายเลขพร้อมเพย์ที่ตั้งไว้สร้าง QR ไม่ได้ — ลูกค้าเติมเงินด้วยพร้อมเพย์ไม่ได้ กรุณาแก้ที่หน้าตั้งค่า', { cooldownSec: 3600 });
+    throw new AppError('PROMPTPAY_NOT_READY', 'ร้านตั้งค่าพร้อมเพย์ไม่ถูกต้อง ยังสร้าง QR ไม่ได้ — กรุณาเลือกโอนเข้าบัญชี หรือติดต่อร้าน', 503);
+  }
 
   // ทำใน transaction: กันกดสร้างพร้อมกันหลายแท็บจนเกินจำนวนที่กำหนด และกันเศษสตางค์ชนกัน
   const dep = db.tx(() => {
-    const open = db.get("SELECT COUNT(*) AS c FROM deposits WHERE user_id = ? AND status = 'pending'", user.id).c;
-    if (open >= MAX_OPEN_DEPOSITS) throw E.validation(`มีรายการเติมเงินรอตรวจสอบ ${open} รายการ กรุณารอแอดมินตรวจสอบหรือยกเลิกรายการเดิมก่อน`);
+    const openIds = db.all("SELECT id FROM deposits WHERE user_id = ? AND status = 'pending' ORDER BY id DESC", user.id).map((r) => r.id);
+    if (openIds.length >= MAX_OPEN_DEPOSITS) {
+      throw new AppError('DEPOSIT_OPEN_LIMIT', `มีรายการเติมเงินที่ยังไม่เสร็จ ${openIds.length} รายการ — ใช้รายการเดิม (ยังโอนได้) หรือรอแอดมินตรวจสอบก่อน`, 409, { open: openIds });
+    }
     if (s.deposit_unique_satang) {
       // สุ่มเศษสตางค์ 1-99 ที่ไม่ซ้ำกับรายการที่รอตรวจ และรายการที่อนุมัติไปใน 48 ชม. ล่าสุด
       // (แอดมินจะได้ไม่สับสนว่ายอดโอนในบัญชีเป็นของรายการไหน)
@@ -86,7 +107,7 @@ async function create(user, { amount, method = 'promptpay', note }) {
     );
     return db.get('SELECT * FROM deposits WHERE id = ?', Number(r.lastInsertRowid));
   });
-  return { deposit: publicDeposit(dep), qr: method === 'promptpay' ? await qrFor(satang) : null };
+  return { deposit: publicDeposit(dep), qr: method === 'promptpay' ? await qrFor(satang) : null, pay_to: payTo() };
 }
 
 function detectImage(buf) {
@@ -99,7 +120,7 @@ function detectImage(buf) {
 function attachSlip(user, depositId, { image, transferAt }) {
   const d = db.get('SELECT * FROM deposits WHERE id = ? AND user_id = ?', Number(depositId), user.id);
   if (!d) throw E.notFound('ไม่พบรายการเติมเงิน');
-  if (d.status !== 'pending') throw E.validation('รายการนี้ตรวจสอบแล้ว แนบสลิปเพิ่มไม่ได้');
+  if (d.status !== 'pending') throw E.validation(closedMessage(d));
   const m = /^data:image\/(png|jpe?g|webp);base64,([A-Za-z0-9+/=\s]+)$/.exec(String(image || ''));
   if (!m) throw E.validation('กรุณาแนบรูปสลิป (JPG, PNG หรือ WEBP)', { field: 'image' });
   const buf = Buffer.from(m[2], 'base64');
@@ -112,10 +133,11 @@ function attachSlip(user, depositId, { image, transferAt }) {
     if (!Number.isFinite(t) || t > Date.now() + 5 * 60000 || t < Date.now() - 7 * 86400000) throw E.validation('เวลาโอนไม่ถูกต้อง', { field: 'transferAt' });
     when = new Date(t).toISOString();
   }
-  // กันใช้สลิปใบเดียวกับหลายรายการ (ไฟล์เดียวกันทุกไบต์)
+  // กันใช้สลิปใบเดียวกับหลายรายการ (ไฟล์เดียวกันทุกไบต์) — ตรวจกับสลิป "ทุกใบที่เคยแนบ" รวมใบที่ถูกเปลี่ยนออกไปแล้ว
   const hash = crypto.createHash('sha256').update(buf).digest('hex');
   const used = db.get(
-    "SELECT id, status FROM deposits WHERE slip_hash = ? AND id != ? AND status IN ('approved','pending') ORDER BY status = 'approved' DESC, id DESC LIMIT 1",
+    `SELECT d.id, d.status FROM deposit_slips s JOIN deposits d ON d.id = s.deposit_id
+     WHERE s.hash = ? AND d.id != ? AND d.status IN ('approved','pending') ORDER BY d.status = 'approved' DESC, d.id DESC LIMIT 1`,
     hash, d.id,
   );
   if (used) {
@@ -124,13 +146,17 @@ function attachSlip(user, depositId, { image, transferAt }) {
       : `สลิปนี้แนบกับรายการเติมเงิน #${used.id} อยู่แล้ว`, { field: 'image' });
   }
   // เคยแนบกับรายการที่ถูกปฏิเสธ/ยกเลิก → ยอมให้แนบ แต่แจ้งแอดมินให้ตรวจละเอียด
-  const same = db.get('SELECT id FROM deposits WHERE slip_hash = ? AND id != ? ORDER BY id DESC LIMIT 1', hash, d.id);
+  const same = db.get('SELECT deposit_id AS id FROM deposit_slips WHERE hash = ? AND deposit_id != ? ORDER BY id DESC LIMIT 1', hash, d.id);
   fs.mkdirSync(slipDir(), { recursive: true });
   const name = `${d.id}-${crypto.randomBytes(8).toString('hex')}.${ext}`;
   fs.writeFileSync(path.join(slipDir(), name), buf);
-  if (d.slip_file) fs.rmSync(path.join(slipDir(), path.basename(d.slip_file)), { force: true });
-  db.run('UPDATE deposits SET slip_file = ?, slip_hash = ?, slip_dup_of = ?, transfer_at = COALESCE(?, transfer_at), updated_at = ? WHERE id = ?',
-    name, hash, same ? same.id : null, when, db.nowIso(), d.id);
+  // เก็บสลิปเดิมไว้ (ไม่ลบ) — แอดมินย้อนดูได้ และใบเดิมจะถูกนำไปใช้กับรายการอื่นไม่ได้
+  const now = db.nowIso();
+  db.tx(() => {
+    db.run('INSERT INTO deposit_slips (deposit_id, hash, file, created_at) VALUES (?, ?, ?, ?)', d.id, hash, name, now);
+    db.run('UPDATE deposits SET slip_file = ?, slip_hash = ?, slip_dup_of = ?, transfer_at = COALESCE(?, transfer_at), updated_at = ? WHERE id = ?',
+      name, hash, same ? same.id : null, when, now, d.id);
+  });
   alertAdmin(`deposit-${d.id}`, `มีรายการเติมเงินเข้ากระเป๋ารอตรวจสอบ ${fmt(d.amount)} บาท (รายการ #${d.id})${same ? ` ⚠️ สลิปเหมือนรายการ #${same.id} ที่เคยถูกปฏิเสธ/ยกเลิก` : ''}`, { cooldownSec: 60 });
   return publicDeposit(db.get('SELECT * FROM deposits WHERE id = ?', d.id));
 }
@@ -147,7 +173,7 @@ function cancel(user, depositId) {
 async function getForUser(user, depositId) {
   const d = db.get('SELECT * FROM deposits WHERE id = ? AND user_id = ?', Number(depositId), user.id);
   if (!d) throw E.notFound('ไม่พบรายการเติมเงิน');
-  return { deposit: publicDeposit(d), qr: d.status === 'pending' && d.method === 'promptpay' ? await qrFor(d.amount) : null };
+  return { deposit: publicDeposit(d), qr: d.status === 'pending' && d.method === 'promptpay' ? await qrFor(d.amount) : null, pay_to: d.status === 'pending' ? payTo() : null };
 }
 
 function listForUser(user, { page, pageSize } = {}) {
@@ -165,9 +191,18 @@ function listAdmin({ status, q, userId, page, pageSize } = {}) {
   else if (status) { where.push('d.status = ?'); params.push(status); }
   if (userId) { where.push('d.user_id = ?'); params.push(Number(userId)); }
   if (q) {
-    const like = `%${String(q).trim().replace(/[%_]/g, '')}%`;
-    where.push('(u.name LIKE ? OR u.phone LIKE ? OR CAST(d.id AS TEXT) = ?)');
-    params.push(like, like, String(q).trim());
+    const text = String(q).trim();
+    const like = `%${text.replace(/[%_]/g, '')}%`;
+    const digits = text.replace(/[^0-9]/g, '');
+    const conds = ['u.name LIKE ?', 'u.phone LIKE ?', 'CAST(d.id AS TEXT) = ?'];
+    params.push(like, digits.length >= 3 ? `%${digits}%` : like, text.replace(/^#/, ''));
+    // ค้นด้วยยอดเงิน: "100.21" = ตรงทุกสตางค์ · "100" = 100.00 - 100.99 (ยอดมีเศษสตางค์สุ่ม)
+    if (/^\d{1,3}(,\d{3})*(\.\d{1,2})?$|^\d+(\.\d{1,2})?$/.test(text)) {
+      const [whole, frac] = text.replace(/,/g, '').split('.');
+      const satang = Number(whole) * 100 + (frac !== undefined ? Number((frac + '00').slice(0, 2)) : 0);
+      if (frac !== undefined) { conds.push('d.amount = ?'); params.push(satang); } else { conds.push('d.amount BETWEEN ? AND ?'); params.push(satang, satang + 99); }
+    }
+    where.push(`(${conds.join(' OR ')})`);
   }
   // amount_dup_of: มีรายการอื่นยอดเดียวกันที่รอตรวจ หรืออนุมัติไปใน 7 วัน → เตือนแอดมินให้ตรวจยอดโอนให้ตรงรายการ
   const res = db.paged({
@@ -180,6 +215,10 @@ function listAdmin({ status, q, userId, page, pageSize } = {}) {
   });
   res.rows = res.rows.map((d) => ({
     ...publicDeposit(d), user_id: d.user_id, user_name: d.user_name, user_phone: d.user_phone, reviewer_name: d.reviewer_name,
+    // รหัสสลิปที่แอดมินเห็น — ต้องส่งกลับมาตอนอนุมัติ (ลูกค้าเปลี่ยนสลิประหว่างนั้น = อนุมัติไม่ได้ ต้องตรวจใหม่)
+    slip_ver: d.slip_hash ? d.slip_hash.slice(0, 12) : null,
+    slip_count: db.get('SELECT COUNT(*) AS c FROM deposit_slips WHERE deposit_id = ?', d.id).c,
+    expired: Boolean(d.expired_at),
     slip_dup_of: d.slip_dup_of || null,
     amount_dup_of: d.status === 'pending' ? d.amount_dup_of || null : null,
   }));
@@ -194,12 +233,23 @@ function slipPath(depositId) {
   return file;
 }
 
-function approve(depositId, actor, { amount, note, noSlip = false, confirmOver = false } = {}, ip) {
+function approve(depositId, actor, { amount, note, noSlip = false, confirmOver = false, slipVer, reopen = false } = {}, ip) {
   const d0 = db.get('SELECT * FROM deposits WHERE id = ?', Number(depositId));
   if (!d0) throw E.notFound('ไม่พบรายการเติมเงิน');
-  if (d0.status !== 'pending') throw E.validation('รายการนี้ถูกตรวจสอบไปแล้ว');
-  const credited = amount !== undefined && amount !== null && amount !== '' ? parseBaht(amount) : d0.amount;
+  // ห้ามอนุมัติรายการเติมเงินของตัวเอง (กันแอดมินเติมเงินให้ตัวเองโดยไม่มีคนตรวจ)
+  if (d0.user_id === actor.id) throw new AppError('SELF_ACTION', 'อนุมัติรายการเติมเงินของตัวเองไม่ได้ — ให้แอดมินคนอื่นตรวจ', 403);
   const reason = String(note || '').trim();
+  if (d0.status === 'approved') throw E.validation('รายการนี้อนุมัติไปแล้ว');
+  if (d0.status !== 'pending') {
+    // หมดเวลา / ถูกปฏิเสธ / ยกเลิกไปแล้ว แต่เงินเข้าบัญชีจริง → เปิดอนุมัติได้เมื่อแอดมินยืนยันพร้อมเหตุผล
+    if (!reopen) throw new AppError('DEPOSIT_CLOSED', `${closedMessage(d0, 'admin')} — ถ้าตรวจพบเงินเข้าบัญชีจริง ยืนยันอนุมัติได้ (ต้องระบุหมายเหตุ)`, 409, { status: d0.status, expired: Boolean(d0.expired_at) });
+    if (reason.length < 3) throw E.validation('อนุมัติรายการที่ปิดไปแล้ว กรุณาระบุหมายเหตุ เช่น เวลาที่เงินเข้าบัญชี', { field: 'note' });
+  }
+  // ต้องเป็นสลิปเดียวกับที่แอดมินเปิดดู (ลูกค้าเปลี่ยนสลิประหว่างนั้น = ต้องตรวจใบใหม่ก่อน)
+  if (d0.slip_hash && slipVer !== d0.slip_hash.slice(0, 12)) {
+    throw new AppError('SLIP_CHANGED', 'ลูกค้าเปลี่ยนสลิปหลังจากที่คุณเปิดดู — กรุณาตรวจสลิปล่าสุดอีกครั้งก่อนอนุมัติ', 409, { slip_ver: d0.slip_hash.slice(0, 12) });
+  }
+  const credited = amount !== undefined && amount !== null && amount !== '' ? parseBaht(amount) : d0.amount;
   // ไม่มีสลิป → อนุมัติได้เมื่อแอดมินยืนยันว่าตรวจยอดเงินเข้าบัญชีแล้ว + ระบุหมายเหตุ (กันอนุมัติจากยอดโอนของรายการอื่น)
   if (!d0.slip_file) {
     if (!noSlip) throw E.conflict('NO_SLIP', 'รายการนี้ยังไม่มีสลิป — อนุมัติได้เฉพาะเมื่อตรวจพบยอดเงินเข้าบัญชีแล้ว (ต้องยืนยันและระบุหมายเหตุ)');
@@ -216,13 +266,13 @@ function approve(depositId, actor, { amount, note, noSlip = false, confirmOver =
   const balance = db.tx(() => {
     const now = db.nowIso();
     const r = db.run(
-      "UPDATE deposits SET status = 'approved', credited_amount = ?, admin_note = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'",
-      credited, String(note || '').trim().slice(0, 300) || null, actor.id, now, now, d0.id,
+      "UPDATE deposits SET status = 'approved', credited_amount = ?, admin_note = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ? WHERE id = ? AND status = ?",
+      credited, String(note || '').trim().slice(0, 300) || null, actor.id, now, now, d0.id, d0.status,
     );
-    if (r.changes !== 1) throw E.validation('รายการนี้ถูกตรวจสอบไปแล้ว');
+    if (r.changes !== 1) throw E.validation('รายการนี้ถูกตรวจสอบไปแล้ว (มีการเปลี่ยนแปลงระหว่างนั้น) กรุณารีเฟรช');
     return wallet.credit(d0.user_id, credited, { type: 'deposit', refType: 'deposit', refId: d0.id, note: `เติมเงินเข้ากระเป๋า #${d0.id}`, actorId: actor.id });
   });
-  audit.log(actor.id, 'deposit.approve', 'deposit', d0.id, { amount: credited, requested: d0.amount, note }, ip);
+  audit.log(actor.id, 'deposit.approve', 'deposit', d0.id, { amount: credited, requested: d0.amount, note, ...(d0.status !== 'pending' ? { reopened_from: d0.status } : {}) }, ip);
   return { deposit: publicDeposit(db.get('SELECT * FROM deposits WHERE id = ?', d0.id)), balance };
 }
 
@@ -234,7 +284,10 @@ function reject(depositId, actor, { note } = {}, ip) {
     "UPDATE deposits SET status = 'rejected', admin_note = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'",
     reason.slice(0, 300), actor.id, now, now, Number(depositId),
   );
-  if (r.changes !== 1) throw E.validation('รายการนี้ถูกตรวจสอบไปแล้ว');
+  if (r.changes !== 1) {
+    const cur = db.get('SELECT * FROM deposits WHERE id = ?', Number(depositId));
+    throw E.validation(cur ? closedMessage(cur, 'admin') : 'ไม่พบรายการเติมเงิน');
+  }
   audit.log(actor.id, 'deposit.reject', 'deposit', Number(depositId), { note: reason }, ip);
   return publicDeposit(db.get('SELECT * FROM deposits WHERE id = ?', Number(depositId)));
 }
@@ -242,10 +295,10 @@ function reject(depositId, actor, { note } = {}, ip) {
 /** ยกเลิกรายการที่ไม่แนบสลิปภายใน 48 ชม. */
 function expireStale() {
   const r = db.run(
-    "UPDATE deposits SET status = 'cancelled', admin_note = 'หมดเวลา (ไม่ได้แนบสลิปภายใน 48 ชั่วโมง)', updated_at = ? WHERE status = 'pending' AND slip_file IS NULL AND created_at < ?",
-    db.nowIso(), new Date(Date.now() - 48 * 3600000).toISOString(),
+    "UPDATE deposits SET status = 'cancelled', admin_note = 'หมดเวลา (ไม่ได้แนบสลิปภายใน 48 ชั่วโมง)', expired_at = ?, updated_at = ? WHERE status = 'pending' AND slip_file IS NULL AND created_at < ?",
+    db.nowIso(), db.nowIso(), new Date(Date.now() - 48 * 3600000).toISOString(),
   );
   return r.changes;
 }
 
-module.exports = { create, attachSlip, cancel, getForUser, listForUser, listAdmin, slipPath, approve, reject, expireStale, publicDeposit, STATUS_LABELS };
+module.exports = { create, attachSlip, cancel, getForUser, listForUser, listAdmin, slipPath, approve, reject, expireStale, publicDeposit, payTo, STATUS_LABELS };

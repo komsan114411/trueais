@@ -147,7 +147,7 @@ function createSession(userId, { ip, userAgent } = {}) {
   return { token, csrf, expiresAt: expires };
 }
 
-function getSession(token) {
+function getSession(token, { background = false } = {}) {
   if (!token || typeof token !== 'string' || token.length > 100) return null;
   const id = sha256(token);
   const row = db.get(
@@ -165,12 +165,15 @@ function getSession(token) {
     return null;
   }
   if (row.status !== 'active') return null;
-  if (now - Date.parse(row.session_seen) > 10 * 60 * 1000) {
+  // คำขอเบื้องหลัง (รีเฟรชอัตโนมัติ) ไม่ต่อเวลา — แอดมินที่เปิดหน้าทิ้งไว้จะถูกออกจากระบบตามเวลาที่ตั้ง
+  let extendedUntil = null;
+  if (!background && now - Date.parse(row.session_seen) > 10 * 60 * 1000) {
     const nextExpiry = Math.min(now + config.sessionDays * 86400000, hardLimit);
     db.run('UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?', db.nowIso(), new Date(nextExpiry).toISOString(), id);
+    extendedUntil = nextExpiry;
   }
   const { session_id, session_csrf, session_expires, session_seen, session_created, ...user } = row;
-  return { id: session_id, csrf: session_csrf, user };
+  return { id: session_id, csrf: session_csrf, user, extendedUntil };
 }
 
 const destroySession = (token) => token && db.run('DELETE FROM sessions WHERE id = ?', sha256(token));
@@ -352,14 +355,46 @@ async function totpDisable(user, { password, code }, { ip, sessionId } = {}) {
   return getById(row.id);
 }
 
+/**
+ * ยืนยันตัวตนผู้ทำรายการอีกครั้ง (รหัสผ่าน + รหัส 6 หลักถ้าเปิดยืนยัน 2 ชั้นไว้)
+ * ใช้กับการกระทำที่มีผลกับบัญชีแอดมิน: ตั้งรหัสผ่านใหม่ / ปิดยืนยัน 2 ชั้น / ระงับ / เปลี่ยนสิทธิ์
+ * กันแอดมินคนหนึ่ง (หรือคนที่แอบใช้เครื่องที่ล็อกอินค้างไว้) ยึดบัญชีเจ้าของร้าน — ใส่รหัสผิด 5 ครั้ง = ออกจากระบบ
+ */
+async function requireReauth(actor, auth = {}, { sessionId } = {}) {
+  const row = getById(actor.id);
+  const pw = auth?.actor_password;
+  if (pw === undefined || pw === null || pw === '') {
+    throw new AppError('REAUTH_REQUIRED', 'การกระทำนี้มีผลกับบัญชีแอดมิน — กรุณายืนยันรหัสผ่านของคุณอีกครั้ง', 403, { totp: Boolean(row.totp_secret) });
+  }
+  try {
+    await checkCurrentPassword(row, pw, { sessionId, field: 'actor_password', message: 'รหัสผ่านของคุณไม่ถูกต้อง' });
+  } catch (err) {
+    if (err.code === 'INVALID_CREDENTIALS') throw new AppError('REAUTH_FAILED', 'รหัสผ่านของคุณไม่ถูกต้อง', 403, { field: 'actor_password' });
+    throw err;
+  }
+  if (row.totp_secret) {
+    if (!auth.actor_code) throw new AppError('REAUTH_REQUIRED', 'กรุณากรอกรหัส 6 หลักจากแอปยืนยันตัวตนของคุณด้วย', 403, { totp: true });
+    const step = totp.verify(row.totp_secret, auth.actor_code, { lastStep: row.totp_last_step });
+    if (step === null) throw new AppError('REAUTH_FAILED', 'รหัสยืนยัน 6 หลักไม่ถูกต้อง หรือหมดอายุแล้ว', 403, { field: 'actor_code' });
+    db.run('UPDATE users SET totp_last_step = ? WHERE id = ? AND (totp_last_step IS NULL OR totp_last_step < ?)', step, row.id, step);
+  }
+}
+
+/** แจ้งแอดมินทุกคน (LINE/Telegram) เมื่อมีการแตะบัญชีแอดมิน */
+function alertAdminAccountChange(actor, target, what) {
+  alertAdmin(`admin-acct-${target.id}-${Date.now()}`, `บัญชีแอดมิน ${target.email || target.phone || target.id} ถูก${what} โดย ${actor.email || actor.name || actor.id} — ถ้าไม่ใช่คุณทำ กรุณาตรวจสอบทันที`, { cooldownSec: 0 });
+}
+
 /** แอดมินปิดการยืนยัน 2 ชั้นให้ลูกค้า (เช่น ลูกค้าทำโทรศัพท์หาย) — ออกจากระบบทุกอุปกรณ์ของบัญชีนั้นด้วย */
-function adminResetTotp(id, actor, ip) {
+async function adminResetTotp(id, actor, ip, auth = {}, ctx = {}) {
   const u = getById(Number(id));
   if (!u) throw E.notFound('ไม่พบผู้ใช้');
   if (!u.totp_secret && !u.totp_pending) throw E.validation('บัญชีนี้ไม่ได้เปิดใช้การยืนยันตัวตน 2 ชั้น');
+  if (u.role === 'admin') await requireReauth(actor, auth, ctx);
   db.run('UPDATE users SET totp_secret = NULL, totp_pending = NULL, totp_enabled_at = NULL, totp_last_step = NULL, updated_at = ? WHERE id = ?', db.nowIso(), u.id);
   destroyUserSessions(u.id);
   audit.log(actor.id, 'user.2fa_reset', 'user', u.id, null, ip);
+  if (u.role === 'admin') alertAdminAccountChange(actor, u, 'ปิดการยืนยันตัวตน 2 ชั้น');
   return getById(u.id);
 }
 
@@ -435,8 +470,11 @@ function list({ q, role, status, page, pageSize } = {}) {
   const params = [];
   if (q) {
     const like = `%${String(q).trim().replace(/[%_]/g, '')}%`;
+    // เบอร์ที่พิมพ์แบบมีขีด/ช่องว่าง (089-123-4567) → ค้นด้วยตัวเลขล้วน
+    const digits = String(q).replace(/[^0-9]/g, '');
+    const phoneLike = digits.length >= 3 ? `%${digits}%` : like;
     where.push('(u.name LIKE ? OR u.phone LIKE ? OR u.email LIKE ? OR CAST(u.id AS TEXT) = ?)');
-    params.push(like, like, like, String(q).trim());
+    params.push(like, phoneLike, like, String(q).trim());
   }
   if (role) { where.push('u.role = ?'); params.push(role); }
   if (status) { where.push('u.status = ?'); params.push(status); }
@@ -462,28 +500,33 @@ function detail(id) {
   return { user: { ...publicUser(u), locked_until: u.locked_until, last_login_ip: u.last_login_ip }, stats };
 }
 
-function setStatus(id, status, actor, ip) {
+async function setStatus(id, status, actor, ip, auth = {}, ctx = {}) {
   if (!['active', 'suspended'].includes(status)) throw E.validation('สถานะไม่ถูกต้อง');
   const u = getById(Number(id));
   if (!u) throw E.notFound('ไม่พบผู้ใช้');
   if (u.id === actor.id) throw E.validation('ไม่สามารถระงับบัญชีของตัวเองได้');
   if (status === 'suspended' && u.role === 'admin' && countActiveAdmins() <= 1) throw E.validation('ต้องมีแอดมินที่ใช้งานได้อย่างน้อย 1 คน');
+  if (u.role === 'admin') await requireReauth(actor, auth, ctx);
   db.run('UPDATE users SET status = ?, locked_until = NULL, failed_logins = 0, updated_at = ? WHERE id = ?', status, db.nowIso(), u.id);
   clearLoginFailures(u);
   if (status === 'suspended') destroyUserSessions(u.id);
   audit.log(actor.id, status === 'suspended' ? 'user.suspend' : 'user.activate', 'user', u.id, null, ip);
+  if (u.role === 'admin') alertAdminAccountChange(actor, u, status === 'suspended' ? 'ระงับการใช้งาน' : 'เปิดใช้งานอีกครั้ง');
   return getById(u.id);
 }
 
-function setRole(id, role, actor, ip) {
+async function setRole(id, role, actor, ip, auth = {}, ctx = {}) {
   if (!['customer', 'admin'].includes(role)) throw E.validation('สิทธิ์ไม่ถูกต้อง');
   const u = getById(Number(id));
   if (!u) throw E.notFound('ไม่พบผู้ใช้');
   if (u.id === actor.id) throw E.validation('ไม่สามารถเปลี่ยนสิทธิ์ของตัวเองได้');
   if (u.role === 'admin' && role !== 'admin' && countActiveAdmins() <= 1) throw E.validation('ต้องมีแอดมินอย่างน้อย 1 คน');
+  // ปลดแอดมิน หรือแต่งตั้งแอดมินใหม่ = ต้องยืนยันตัวตนซ้ำ
+  if (u.role === 'admin' || role === 'admin') await requireReauth(actor, auth, ctx);
   db.run('UPDATE users SET role = ?, updated_at = ? WHERE id = ?', role, db.nowIso(), u.id);
   destroyUserSessions(u.id);
   audit.log(actor.id, 'user.role', 'user', u.id, { from: u.role, to: role }, ip);
+  if (u.role === 'admin' || role === 'admin') alertAdminAccountChange(actor, u, role === 'admin' ? 'ตั้งเป็นแอดมิน' : 'ปลดจากแอดมิน');
   return getById(u.id);
 }
 
@@ -501,14 +544,16 @@ function setDailyLimit(id, limitBaht, actor, ip) {
   return getById(u.id);
 }
 
-async function resetPassword(id, newPassword, actor, ip) {
+async function resetPassword(id, newPassword, actor, ip, auth = {}, ctx = {}) {
   const u = getById(Number(id));
   if (!u) throw E.notFound('ไม่พบผู้ใช้');
   validatePassword(newPassword, 'password', { phone: u.phone, email: u.email });
+  if (u.role === 'admin') await requireReauth(actor, auth, ctx);
   db.run('UPDATE users SET password_hash = ?, failed_logins = 0, locked_until = NULL, updated_at = ? WHERE id = ?', await hashPassword(newPassword), db.nowIso(), u.id);
   clearLoginFailures(u);
   destroyUserSessions(u.id);
   audit.log(actor.id, 'user.password_reset', 'user', u.id, null, ip);
+  if (u.role === 'admin') alertAdminAccountChange(actor, u, 'ตั้งรหัสผ่านใหม่');
 }
 
 const countActiveAdmins = () => db.get("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND status = 'active'").c;

@@ -63,7 +63,7 @@ router.post('/orders', (req, res) => {
     amount: b.amount,
     productCode: b.product_code,
     idempotencyKey: b.reference,
-    confirmDuplicate: b.allow_duplicate === true,
+    confirmDuplicate: b.allow_duplicate === true || b.allow_duplicate === 'true' || b.allow_duplicate === 1,
     expectedPrice,
     shop: b.shop,
   }, { source: 'api', ip: req.ip, apiKeyId: req.apiKey.id, callbackUrl });

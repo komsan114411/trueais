@@ -1,17 +1,21 @@
-// ตั้งค่าระบบ: สถานะผู้ให้บริการ + สำรองข้อมูล + ฟอร์มตั้งค่า (สร้างอัตโนมัติจาก schema ของเซิร์ฟเวอร์)
-import { html, raw, api, baht, dateTimeSec, timeAgo, toast, toastError, withLoading, on, copyText, confirmDialog } from '../lib.js';
-import { icon, store } from './common.js';
+// ตั้งค่าระบบ: สถานะผู้ให้บริการ + การแจ้งเตือน + สำรองข้อมูล + ฟอร์มตั้งค่า (สร้างอัตโนมัติจาก schema ของเซิร์ฟเวอร์)
+import { html, raw, api, baht, dateTimeSec, timeAgo, modal, toast, toastError, withLoading, on, copyText, confirmDialog } from '../lib.js';
+import { icon, store, ROUTING_KEYS, confirmRoutingChange, testNotify, shortLabel } from './common.js';
 
 const CAP_LABELS = { statusCheck: 'เช็กสถานะรายการ', balance: 'เช็กเครดิต', products: 'ดึงรายการแพ็กเกจ', callback: 'รับแจ้งผล (callback)' };
+// คู่มือการเชื่อมต่อของแต่ละเจ้า (โฟลเดอร์ docs ของระบบ)
+const DOCS = { wondd: 'docs/WONDD-INTEGRATION.md', hubzell: 'docs/HUBZELL-INTEGRATION.md' };
 const fileSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+const backupUrl = (name) => `/api/admin/backups/${encodeURIComponent(name)}/download`;
 
 function providerPanel(p) {
   const b = p.balance;
   const br = p.breaker;
+  const name = shortLabel(p);
   return html`<section class="card">
     <div class="card-head">
       <h3>ผู้ให้บริการหลัก${p.providers?.length > 1 ? html` <span class="small muted">(มี ${p.providers.length} เจ้า — <a href="#/providers">ดูทุกเจ้า / ตั้งลำดับและการสลับอัตโนมัติ</a>)</span>` : ''}</h3>
-      <span class="mode-badge ${p.live ? 'live' : 'mock'}">${p.live ? `ใช้งานจริง (${p.label})` : 'โหมดทดสอบ (MOCK)'}</span>
+      <span class="mode-badge ${p.live ? 'live' : 'mock'}">${p.live ? `ใช้งานจริง (${name})` : 'โหมดทดสอบ (MOCK)'}</span>
     </div>
     <div class="grid cols-2">
       <div class="stack">
@@ -20,12 +24,11 @@ function providerPanel(p) {
           <dt>สถานะการตั้งค่า</dt><dd>${p.config.ready ? html`<span class="badge success">พร้อมรับรายการ</span>` : html`<span class="badge danger">ยังไม่พร้อม — ระบบไม่รับรายการใหม่</span>`}</dd>
           <dt>ความสามารถ</dt><dd class="small">${Object.entries(CAP_LABELS).map(([k, l]) => html`<span class="pill" style="margin:0 4px 4px 0">${p.capabilities?.[k] ? '✓' : '✕'} ${l}</span>`)}</dd>
           <dt>เครดิตคงเหลือ</dt><dd>${b && b.balance !== null && b.balance !== undefined ? html`<b>฿${baht(b.balance)}</b>` : '-'} ${b?.checked_at ? html`<span class="muted small">(${timeAgo(b.checked_at)})</span>` : ''}${b?.error ? html`<div class="small text-danger">${b.error}</div>` : ''}</dd>
-          <dt>แจ้งเตือนแอดมิน</dt><dd class="small">LINE: ${p.notify?.line ? html`<span class="text-success">ตั้งค่าแล้ว</span>` : html`<span class="muted">ยังไม่ตั้ง</span>`} · Telegram: ${p.notify?.telegram ? html`<span class="text-success">ตั้งค่าแล้ว</span>` : html`<span class="muted">ยังไม่ตั้ง</span>`}<div class="muted">ตั้งใน .env (LINE_CHANNEL_ACCESS_TOKEN / TELEGRAM_BOT_TOKEN)</div></dd>
         </dl>
-        ${p.config.ready ? '' : html`<div class="alert danger"><span class="alert-icon">!</span><div><b>สิ่งที่ยังขาด:</b><ul class="check-list">${p.config.missing.map((m) => html`<li>${m}</li>`)}</ul><div class="small mt-1">แก้ไฟล์ .env แล้วรีสตาร์ทระบบ — ดูขั้นตอนใน docs/WONDD-INTEGRATION.md</div></div></div>`}
+        ${p.config.ready ? '' : html`<div class="alert danger"><span class="alert-icon">!</span><div><b>สิ่งที่ยังขาด:</b><ul class="check-list">${p.config.missing.map((m) => html`<li>${m}</li>`)}</ul><div class="small mt-1">แก้ไฟล์ .env แล้วรีสตาร์ทระบบ — ดูขั้นตอนในคู่มือการเชื่อมต่อ ${name}${DOCS[p.name] ? html` (<span class="mono">${DOCS[p.name]}</span>)` : ' (โฟลเดอร์ docs)'}</div></div></div>`}
       </div>
       <div class="stack">
-        <div><div class="code-label">Callback URL (ให้ WonDD ส่งผลกลับมาที่นี่)</div>
+        <div><div class="code-label">Callback URL (ให้ ${name} ส่งผลกลับมาที่นี่)</div>
           <div class="copy-field"><code style="white-space:normal;word-break:break-all">${p.callback_url}</code><button class="btn sm" data-copy="${p.callback_url}" title="คัดลอก URL ทั้งเส้น">${icon('copy')}คัดลอก</button></div>
           <div class="small text-danger mt-1">ให้นำ URL นี้ทั้งเส้นไปตั้งที่ผู้ให้บริการ (มีรหัสลับ ห้ามเผยแพร่)</div></div>
         <div><div class="code-label">ที่อยู่เว็บไซต์ (PUBLIC_URL)</div><div class="copy-field"><code>${p.public_url}</code></div></div>
@@ -43,7 +46,7 @@ function providerPanel(p) {
         </div>
         ${p.live ? '' : html`<form class="detail-section" data-mock>
           <h4>เครดิตจำลอง (โหมดทดสอบ)</h4>
-          <div class="row"><input class="input" name="amount" inputmode="decimal" placeholder="จำนวนบาท" value="10000" style="max-width:180px"><button class="btn sm" type="submit">${icon('plus')}เติมเครดิตจำลอง</button></div>
+          <div class="row wrap"><input class="input" name="amount" inputmode="decimal" placeholder="จำนวนบาท" value="10000" style="max-width:180px"><button class="btn sm" type="submit">${icon('plus')}เติมเครดิตจำลอง</button></div>
           <p class="xsmall muted mt-1 mb-0">ทดสอบได้ด้วยเบอร์พิเศษ (4 หลักท้าย): 0000 ปฏิเสธ · 1111 timeout · 2222 ค้าง · 3333 ไม่สำเร็จภายหลัง · 4444 เชื่อมต่อไม่ได้ · 5555 สำเร็จภายหลัง</p>
         </form>`}
       </div>
@@ -51,13 +54,35 @@ function providerPanel(p) {
   </section>`;
 }
 
+/** การแจ้งเตือนแอดมิน (LINE / Telegram) + ปุ่มส่งข้อความทดสอบ */
+function notifyCard(p) {
+  const n = p.notify || {};
+  const any = n.line || n.telegram;
+  return html`<section class="card" id="notify" data-focus="notify">
+    <div class="card-head"><h3>${icon('bell')} แจ้งเตือนแอดมิน</h3>
+      <button class="btn sm ${any ? 'primary' : ''}" data-act="notify-test">${icon('bell')}ส่งข้อความทดสอบ</button></div>
+    <p class="small mb-1">LINE: ${n.line ? html`<span class="text-success bold">ตั้งค่าแล้ว</span>` : html`<span class="muted">ยังไม่ตั้ง</span>`} ·
+      Telegram: ${n.telegram ? html`<span class="text-success bold">ตั้งค่าแล้ว</span>` : html`<span class="muted">ยังไม่ตั้ง</span>`}</p>
+    <p class="small muted mb-0">${any
+      ? 'กด "ส่งข้อความทดสอบ" แล้วดูว่าโทรศัพท์ได้รับข้อความ — ระบบจะแจ้งเมื่อมีรายการต้องตรวจสอบ, เครดิตใกล้หมด, ผู้ให้บริการขัดข้อง, มีการแตะบัญชีแอดมิน'
+      : 'ยังไม่ได้ตั้ง — จะไม่รู้ทันทีเมื่อมีรายการต้องตรวจสอบ ตั้งค่าในไฟล์ .env (LINE_CHANNEL_ACCESS_TOKEN + ผู้รับ หรือ TELEGRAM_BOT_TOKEN + chat id) แล้วรีสตาร์ทระบบ'}</p>
+  </section>`;
+}
+
 function backupCard(list) {
-  return html`<section class="card">
+  return html`<section class="card" id="backup" data-focus="backup">
     <div class="card-head"><h3>สำรองข้อมูล</h3><button class="btn sm primary" data-act="backup">${icon('download')}สำรองตอนนี้</button></div>
-    <p class="small muted">ระบบสำรองอัตโนมัติวันละครั้ง เก็บ 14 ชุดล่าสุดที่โฟลเดอร์ <code>data/backups</code> (ไฟล์อยู่บนเซิร์ฟเวอร์ ควรคัดลอกเก็บไว้ที่อื่นด้วย)</p>
+    <p class="small muted">ระบบสำรองอัตโนมัติวันละครั้ง ไฟล์อยู่บนเครื่องที่รันระบบ (โฟลเดอร์ <code>data/backups</code>)</p>
+    <div class="alert warning mb-2"><span class="alert-icon">!</span><div class="small"><b>ดาวน์โหลดเก็บไว้นอกเครื่องนี้อย่างน้อยสัปดาห์ละครั้ง</b> (เช่น Google Drive, แฟลชไดรฟ์) — ถ้าเครื่องนี้เสียหรือหาย ข้อมูลยอดเงินลูกค้าและรายการทั้งหมดจะหายไปด้วย ·
+      ไฟล์มีข้อมูลลูกค้า เก็บไว้ในที่ที่มีรหัสผ่าน ห้ามส่งต่อ</div></div>
     ${list === null ? html`<p class="small text-danger mb-0">โหลดรายการสำรองไม่สำเร็จ</p>` : list.length
-      ? html`<div class="table-wrap"><table class="table"><thead><tr><th>ไฟล์</th><th class="num">ขนาด</th><th>เวลา</th></tr></thead>
-          <tbody>${list.map((b) => html`<tr><td class="mono small">${b.name}</td><td class="num">${fileSize(b.size)}</td><td class="small nowrap">${dateTimeSec(b.created_at)}</td></tr>`)}</tbody></table></div>`
+      ? html`<div class="table-wrap"><table class="table cards-sm"><thead><tr><th>ไฟล์</th><th class="num">ขนาด</th><th>เวลา</th><th></th></tr></thead>
+          <tbody>${list.map((b) => html`<tr>
+            <td class="mono small o1 full">${b.name}</td>
+            <td class="num o3 left-sm" data-label="ขนาด">${fileSize(b.size)}</td>
+            <td class="small nowrap o4 r" data-label="เวลา">${dateTimeSec(b.created_at)}</td>
+            <td class="actions o5 full"><a class="btn sm" href="${backupUrl(b.name)}" download="${b.name}" data-download="${b.name}">${icon('download')}ดาวน์โหลด</a></td>
+          </tr>`)}</tbody></table></div>`
       : html`<p class="small muted mb-0">ยังไม่มีไฟล์สำรอง</p>`}
   </section>`;
 }
@@ -67,18 +92,23 @@ function control(f, value) {
   // มีตัวเลือกกำหนดไว้ → ให้เลือกจากรายการ (กันพิมพ์ค่าผิด)
   if (Array.isArray(f.options) && f.options.length) {
     const has = f.options.some((o) => String(o.value) === String(value ?? ''));
-    return html`<select class="select" name="${name}">${has ? '' : html`<option value="${value ?? ''}" selected>${value ?? ''} (ค่าปัจจุบัน)</option>`}${f.options.map((o) => html`<option value="${o.value}" ${String(o.value) === String(value ?? '') ? raw('selected') : ''}>${o.label}</option>`)}</select>`;
+    return html`<select class="select" name="${name}" id="set-${name}">${has ? '' : html`<option value="${value ?? ''}" selected>${value ?? ''} (ค่าปัจจุบัน)</option>`}${f.options.map((o) => html`<option value="${o.value}" ${String(o.value) === String(value ?? '') ? raw('selected') : ''}>${o.label}</option>`)}</select>`;
   }
   if (f.type === 'boolean') {
-    return html`<label class="switch"><input type="checkbox" name="${name}" ${value ? raw('checked') : ''}><span class="track"></span><span class="small" data-swlabel>${value ? 'เปิด' : 'ปิด'}</span></label>`;
+    return html`<label class="switch"><input type="checkbox" name="${name}" id="set-${name}" ${value ? raw('checked') : ''}><span class="track"></span><span class="small" data-swlabel>${value ? 'เปิด' : 'ปิด'}</span></label>`;
   }
   if (f.type === 'number') {
-    return html`<input class="input" type="number" name="${name}" value="${value}" ${f.min !== undefined ? html`min="${f.min}"` : ''} ${f.max !== undefined ? html`max="${f.max}"` : ''} step="any">`;
+    return html`<input class="input" type="number" name="${name}" id="set-${name}" value="${value}" ${f.min !== undefined ? html`min="${f.min}"` : ''} ${f.max !== undefined ? html`max="${f.max}"` : ''} step="any" inputmode="numeric">`;
   }
   if (f.type === 'text') {
-    return html`<textarea class="textarea" name="${name}" ${f.max ? html`maxlength="${f.max}"` : ''}>${value ?? ''}</textarea>`;
+    return html`<textarea class="textarea" name="${name}" id="set-${name}" ${f.max ? html`maxlength="${f.max}"` : ''}>${value ?? ''}</textarea>`;
   }
-  return html`<input class="input" name="${name}" value="${value ?? ''}" ${f.max ? html`maxlength="${f.max}"` : ''}>`;
+  // หมายเลขพร้อมเพย์: ปุ่มทดสอบ QR 1 บาท (สแกนดูชื่อผู้รับก่อนเปิดรับเงินจริง)
+  if (name === 'promptpay_id') {
+    return html`<div class="stack" style="--gap:6px"><input class="input" name="${name}" id="set-${name}" value="${value ?? ''}" ${f.max ? html`maxlength="${f.max}"` : ''} inputmode="numeric" autocomplete="off">
+      <button type="button" class="btn sm" data-act="pp-test">${icon('qr')}ทดสอบ QR 1 บาท</button></div>`;
+  }
+  return html`<input class="input" name="${name}" id="set-${name}" value="${value ?? ''}" ${f.max ? html`maxlength="${f.max}"` : ''}>`;
 }
 
 function settingsForm(values, schema, live) {
@@ -90,8 +120,11 @@ function settingsForm(values, schema, live) {
       return html`<section class="card">
         <div class="card-head"><h3>${label}</h3>${g === 'mock' ? html`<span class="badge ${live ? '' : 'warning'} plain">${live ? 'ไม่มีผลในโหมดใช้งานจริง' : 'ใช้เฉพาะโหมดทดสอบ'}</span>` : ''}</div>
         ${fields.map((f) => html`<div class="setting-row ${f.type === 'text' ? 'wide' : ''}" data-row="${f.key}">
-          <div><div class="s-label">${f.label}</div>${f.help ? html`<div class="s-help">${f.help}</div>` : ''}<div class="s-help">ค่าเริ่มต้น: ${f.type === 'boolean' ? (f.default ? 'เปิด' : 'ปิด') : f.default === '' ? '(ว่าง)' : String(f.default)}${f.min !== undefined ? ` · ช่วง ${f.min} - ${f.max}` : ''}</div></div>
-          <div>${control(f, values[f.key])}</div>
+          <div>${f.type === 'boolean'
+            // สวิตช์: ชื่อการตั้งค่าไม่ใช่ปุ่มกด (กันแตะชื่อแล้วสวิตช์เปลี่ยนเองโดยไม่ตั้งใจ)
+            ? html`<div class="s-label">${f.label}</div>`
+            : html`<label class="s-label" for="set-${f.key}">${f.label}</label>`}${f.help ? html`<div class="s-help">${f.help}</div>` : ''}<div class="s-help">ค่าเริ่มต้น: ${f.type === 'boolean' ? (f.default ? 'เปิด' : 'ปิด') : f.default === '' ? '(ว่าง)' : String(f.default)}${f.min !== undefined ? ` · ช่วง ${f.min} - ${f.max}` : ''}</div></div>
+          <div>${control(f, values[f.key])}<div class="s-error" data-err="${f.key}" role="alert"></div></div>
         </div>`)}
       </section>`;
     })}
@@ -110,9 +143,29 @@ function readValue(form, f) {
   return el.value;
 }
 
-export async function render(el) {
+/** ค่าที่อ่านเข้าใจสำหรับหน้าต่างสรุป */
+function showValue(f, v) {
+  if (f.type === 'boolean') return v ? 'เปิด' : 'ปิด';
+  if (Array.isArray(f.options)) return f.options.find((o) => String(o.value) === String(v))?.label || String(v ?? '');
+  const s = String(v ?? '');
+  if (!s) return '(ว่าง)';
+  return s.length > 60 ? `${s.slice(0, 60)}…` : s;
+}
+
+// การตั้งค่าที่เปลี่ยนแล้วเสี่ยง → เตือนเพิ่มในหน้าต่างสรุป
+const RISKY = {
+  maintenance_mode: (v) => (v === true ? 'ลูกค้าและ API ร้านค้าจะทำรายการใหม่ไม่ได้จนกว่าจะปิดโหมดนี้ (รายการที่ค้างอยู่ยังทำงานต่อตามปกติ)' : ''),
+  registration_enabled: (v) => (v === false ? 'ปิดรับสมัคร — ลูกค้าใหม่สมัครสมาชิกไม่ได้' : ''),
+  duplicate_window_sec: (v) => (v === 0 ? 'ปิดการกันเติมซ้ำ — เบอร์ + ยอดเดียวกันจะเติมซ้ำได้ทันที (เสี่ยงลูกค้ากดซ้ำ)' : ''),
+  daily_limit_baht: (v) => (v === 0 ? 'วงเงินต่อวัน = ไม่จำกัด — ถ้าบัญชีลูกค้าถูกขโมย จะใช้เงินในกระเป๋าได้ทั้งหมดทันที' : ''),
+  deposit_unique_satang: (v) => (v === false ? 'ปิดเศษสตางค์ — ยอดโอนของลูกค้าจะซ้ำกันได้ ตรวจสลิปจับคู่รายการยากขึ้น' : ''),
+  promptpay_id: () => 'หมายเลขพร้อมเพย์เปลี่ยน — ลูกค้าจะโอนเงินเข้าหมายเลขใหม่ทันที (แนะนำกด "ทดสอบ QR 1 บาท" ตรวจชื่อผู้รับก่อน)',
+};
+
+export async function render(el, params, query = {}) {
   el.innerHTML = html`
     <div data-provider><div class="card"><span class="spinner"></span></div></div>
+    <div data-notify></div>
     <div data-backups></div>
     <div data-form><div class="card"><span class="spinner"></span></div></div>`.toString();
 
@@ -121,6 +174,7 @@ export async function render(el) {
     try {
       provider = await api.get('/api/admin/provider');
       el.querySelector('[data-provider]').innerHTML = providerPanel(provider).toString();
+      el.querySelector('[data-notify]').innerHTML = notifyCard(provider).toString();
     } catch (err) {
       el.querySelector('[data-provider]').innerHTML = html`<div class="alert danger">${err.message}</div>`.toString();
     }
@@ -133,6 +187,7 @@ export async function render(el) {
 
   let schema = null;
   let original = {};
+  let form = null;
   const loadSettings = async () => {
     const s = await api.get('/api/admin/settings');
     schema = s.schema;
@@ -141,8 +196,26 @@ export async function render(el) {
     bindForm();
   };
 
+  /** แสดง error ที่แถวของการตั้งค่านั้น (เช่น หมายเลขพร้อมเพย์ไม่ถูกต้อง) */
+  const rowError = (field, message) => {
+    if (!form) return false;
+    const row = form.querySelector(`[data-row="${CSS.escape(field)}"]`);
+    if (!row) return false;
+    row.classList.add('has-error');
+    const t = row.querySelector('.s-error');
+    if (t) t.textContent = message;
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    row.querySelector('input, select, textarea')?.focus({ preventScroll: true });
+    return true;
+  };
+  const clearRowErrors = () => form?.querySelectorAll('.setting-row.has-error').forEach((r) => {
+    r.classList.remove('has-error');
+    const t = r.querySelector('.s-error');
+    if (t) t.textContent = '';
+  });
+
   function bindForm() {
-    const form = el.querySelector('[data-settings]');
+    form = el.querySelector('[data-settings]');
     const changedLabel = form.querySelector('[data-changed]');
     const saveBtn = form.querySelector('[data-save]');
     const resetBtn = form.querySelector('[data-reset]');
@@ -164,7 +237,10 @@ export async function render(el) {
       saveBtn.disabled = !n;
       resetBtn.disabled = !n;
     };
-    form.addEventListener('input', refresh);
+    form.addEventListener('input', (e) => {
+      e.target.closest('.setting-row')?.classList.remove('has-error');
+      refresh();
+    });
     form.addEventListener('change', (e) => {
       const lbl = e.target.closest('.switch')?.querySelector('[data-swlabel]');
       if (lbl) lbl.textContent = e.target.checked ? 'เปิด' : 'ปิด';
@@ -173,13 +249,29 @@ export async function render(el) {
     resetBtn.addEventListener('click', () => loadSettings().catch(toastError));
     form.addEventListener('submit', (e) => {
       e.preventDefault();
+      clearRowErrors();
       const d = diff();
       const bad = Object.entries(d).find(([, v]) => typeof v === 'number' && Number.isNaN(v));
-      if (bad) { toast('กรุณากรอกตัวเลขให้ครบ', 'error'); return; }
+      if (bad) { rowError(bad[0], 'กรุณากรอกตัวเลข'); toast('กรุณากรอกตัวเลขให้ครบ', 'error'); return; }
       withLoading(saveBtn, async () => {
         try {
-          if (d.maintenance_mode === true) {
-            const ok = await confirmDialog({ title: 'เปิดโหมดปิดปรับปรุง', body: 'ลูกค้าและ API ร้านค้าจะทำรายการใหม่ไม่ได้จนกว่าจะปิดโหมดนี้ (รายการที่ค้างอยู่ยังทำงานต่อตามปกติ)', confirmText: 'เปิดโหมดปิดปรับปรุง', danger: true });
+          // การเลือกผู้ให้บริการ → หน้าต่างยืนยันเดียวกับหน้า "ผู้ให้บริการ & ร้าน"
+          const routing = Object.fromEntries(Object.entries(d).filter(([k]) => ROUTING_KEYS.includes(k)));
+          if (!(await confirmRoutingChange(routing, { values: original, providers: provider?.providers || [] }))) return;
+          // การตั้งค่าอื่น: สรุป "ค่าเดิม → ค่าใหม่" ให้ตรวจก่อนบันทึก (กันแก้โดยไม่ตั้งใจ) + เตือนเรื่องเสี่ยง
+          const rest = Object.entries(d).filter(([k]) => !ROUTING_KEYS.includes(k));
+          if (rest.length) {
+            const fieldOf = (k) => schema.fields.find((f) => f.key === k) || { key: k, label: k };
+            const risks = rest.map(([k, v]) => RISKY[k]?.(v)).filter(Boolean);
+            const ok = await confirmDialog({
+              title: d.maintenance_mode === true ? 'เปิดโหมดปิดปรับปรุง' : `บันทึกการตั้งค่า ${rest.length} รายการ`,
+              body: html`<div class="stack">
+                <ul class="check-list small">${rest.map(([k, v]) => { const f = fieldOf(k); return html`<li><b>${f.label}</b>: ${showValue(f, original[k])} → <b>${showValue(f, v)}</b></li>`; })}</ul>
+                ${risks.length ? html`<div class="alert danger"><span class="alert-icon">!</span><div><ul class="check-list small">${risks.map((r) => html`<li>${r}</li>`)}</ul></div></div>` : ''}
+                <p class="small mb-0">มีผลทันทีหลังบันทึก</p></div>`,
+              confirmText: d.maintenance_mode === true ? 'เปิดโหมดปิดปรับปรุง' : 'บันทึก',
+              danger: risks.length > 0,
+            });
             if (!ok) return;
           }
           const r = await api.put('/api/admin/settings', d);
@@ -188,16 +280,63 @@ export async function render(el) {
           store.refresh().catch(() => {});
         } catch (err) {
           const field = err.details?.field;
-          if (field) form.querySelector(`[data-row="${CSS.escape(field)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          toastError(err);
+          if (!(field && rowError(field, err.message))) toastError(err);
         }
       });
     });
   }
 
+  /** ทดสอบ QR พร้อมเพย์ 1 บาท — ใช้หมายเลขที่กรอกอยู่ (ยังไม่บันทึกก็ได้) ให้เจ้าของร้านสแกนดูชื่อผู้รับ (ไม่ต้องโอน) */
+  const promptpayTest = async (btn) => {
+    const input = form?.querySelector('[name="promptpay_id"]');
+    const typed = input ? input.value.trim() : '';
+    const saved = String(original.promptpay_id || '');
+    if (!typed && !saved) { rowError('promptpay_id', 'กรุณากรอกหมายเลขพร้อมเพย์ก่อน'); return; }
+    const unsaved = typed !== saved;
+    await withLoading(btn, async () => {
+      try {
+        const r = await api.post('/api/admin/settings/promptpay-test', unsaved && typed ? { promptpay_id: typed } : {});
+        form?.querySelector('[data-row="promptpay_id"]')?.classList.remove('has-error');
+        const nameInput = form?.querySelector('[name="promptpay_name"]');
+        const shopName = (nameInput ? nameInput.value : original.promptpay_name || '').trim();
+        modal({
+          title: 'ทดสอบ QR พร้อมเพย์ (1 บาท)',
+          body: html`<div class="stack pp-test">
+            <div class="pp-qr">${raw(r.qr_svg || '')}</div>
+            <dl class="dl"><dt>พร้อมเพย์</dt><dd class="num">${r.target}</dd><dt>ยอดทดสอบ</dt><dd>${baht(r.amount)} บาท</dd>
+              <dt>ชื่อที่ร้านตั้งไว้</dt><dd>${shopName || html`<span class="muted">(ยังไม่ได้ตั้ง)</span>`}</dd></dl>
+            <ol class="small mb-0 pp-steps">
+              <li>เปิดแอปธนาคาร → สแกนจ่าย แล้วสแกน QR นี้ (ถ้าเปิดหน้านี้ในโทรศัพท์เครื่องเดียวกัน ให้บันทึกภาพหน้าจอ แล้วเลือก "สแกนจากรูป" ในแอปธนาคาร)</li>
+              <li>ดู<b>ชื่อผู้รับเงิน</b>ที่แอปแสดง — ต้องเป็นชื่อบัญชีของร้านคุณ${shopName ? html` (ตรงกับ "${shopName}")` : ''}</li>
+              <li><b>ไม่ต้องกดโอน</b> — ตรวจชื่อแล้วกดยกเลิกในแอปได้เลย</li>
+            </ol>
+            <div class="alert danger"><span class="alert-icon">!</span><div class="small">ถ้าชื่อผู้รับไม่ใช่ร้านคุณ <b>ห้ามบันทึก/ใช้หมายเลขนี้</b> — ลูกค้าจะโอนเงินเข้าบัญชีคนอื่น</div></div>
+            ${unsaved ? html`<p class="small text-warning mb-0">หมายเลขนี้ยังไม่ได้บันทึก — ถ้าชื่อถูกต้อง ปิดหน้าต่างนี้แล้วกด "บันทึกการตั้งค่า"</p>` : ''}
+          </div>`,
+          foot: html`<button class="btn primary" data-close>ปิด</button>`,
+        });
+      } catch (err) {
+        if (!(err.details?.field && rowError(err.details.field, err.message))) toastError(err);
+      }
+    });
+  };
+
   on(el, 'click', '[data-copy]', (e, b) => copyText(b.dataset.copy));
-  on(el, 'click', '[data-act]', (e, b) => {
+  on(el, 'click', '[data-act]', async (e, b) => {
     const act = b.dataset.act;
+    if (act === 'pp-test') { promptpayTest(b); return; }
+    if (act === 'notify-test') { testNotify(b); return; }
+    if (act === 'reset-breaker') {
+      // เปิดรับทั้งที่ยังไม่ได้แก้ปัญหา (เช่น เครดิตหมด / key / KYC / IP) อาจล้มเหลวซ้ำ และผู้ให้บริการอาจบล็อก → ยืนยันก่อน (เหมือนหน้าอื่น)
+      const br = provider?.breaker || {};
+      const ok = await confirmDialog({
+        title: `เปิดรับรายการ ${provider ? shortLabel(provider) : ''} ทันที`,
+        body: `${br.reason || br.lastError ? `เหตุที่พัก: ${br.reason || br.lastError} — ` : ''}เปิดใช้เมื่อแก้ปัญหาแล้วเท่านั้น ถ้ายังไม่ได้แก้ ระบบจะส่งรายการแล้วล้มเหลวซ้ำ และผู้ให้บริการอาจบล็อกการเชื่อมต่อ`,
+        confirmText: 'เปิดรับรายการ',
+        danger: true,
+      });
+      if (!ok) return;
+    }
     withLoading(b, async () => {
       try {
         if (act === 'reset-breaker') {
@@ -212,7 +351,7 @@ export async function render(el) {
           toast('รันงานเบื้องหลังเสร็จแล้ว', 'success');
         } else if (act === 'backup') {
           const r = await api.post('/api/admin/backups', {});
-          toast(`สำรองข้อมูลแล้ว: ${r.name} (${fileSize(r.size)})`, 'success', 5000);
+          toast(`สำรองข้อมูลแล้ว: ${r.name} (${fileSize(r.size)}) — กด "ดาวน์โหลด" เพื่อเก็บสำเนาไว้นอกเครื่องนี้`, 'success', 7000);
           await loadBackups();
           return;
         }
@@ -224,11 +363,11 @@ export async function render(el) {
     });
   });
   el.addEventListener('submit', (e) => {
-    const form = e.target.closest('[data-mock]');
-    if (!form) return;
+    const mock = e.target.closest('[data-mock]');
+    if (!mock) return;
     e.preventDefault();
-    const btn = form.querySelector('button[type="submit"]');
-    const amount = form.querySelector('[name="amount"]').value.trim().replace(/,/g, '');
+    const btn = mock.querySelector('button[type="submit"]');
+    const amount = mock.querySelector('[name="amount"]').value.trim().replace(/,/g, '');
     if (!/^\d{1,7}(\.\d{1,2})?$/.test(amount) || !(Number(amount) > 0)) { toast('จำนวนเงินไม่ถูกต้อง (ตัวเลขมากกว่า 0)', 'error'); return; }
     withLoading(btn, async () => {
       try {
@@ -250,4 +389,14 @@ export async function render(el) {
   await Promise.all([loadBackups(), loadSettings().catch((err) => {
     el.querySelector('[data-form]').innerHTML = html`<div class="alert danger">${err.message}</div>`.toString();
   })]);
+
+  // มาจากลิงก์ "ไปแก้" (เช่น #/settings?focus=promptpay_id / backup / notify) → เลื่อนไปที่หัวข้อนั้น
+  if (query.focus) {
+    const target = el.querySelector(`[data-row="${CSS.escape(query.focus)}"], [data-focus="${CSS.escape(query.focus)}"]`);
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.add('flash');
+      setTimeout(() => target.classList.remove('flash'), 2400);
+    }
+  }
 }

@@ -28,15 +28,20 @@
 
 ### 1. ใส่ข้อมูลใน `.env`
 
+**ยังไม่ต้องเพิ่ม `wondd` ใน `PROVIDERS`** จนกว่าจะทำข้อ 3 เสร็จ — คงค่าเดิมไว้ (`PROVIDERS=mock,mock2` ถ้ายังทดสอบอยู่ หรือ `PROVIDERS=hubzell` ถ้าใช้ HubZell จริงอยู่แล้ว)
+แก้บรรทัดเดิมที่มีอยู่แล้วในไฟล์ `.env` (ไม่ต้องเพิ่มบรรทัดใหม่ซ้ำ):
+
 ```ini
-PROVIDERS=mock,mock2     # ยังเป็นโหมดทดสอบ จนกว่าจะทำข้อ 3 เสร็จ
 PUBLIC_URL=https://www.เว็บของคุณ.com
-WONDD_API_URL=https://...        # จากคู่มือ
+# จากคู่มือ WonDD
+WONDD_API_URL=https://...
 WONDD_USERNAME=...
 WONDD_API_KEY=...
 WONDD_API_SECRET=...
-WONDD_CALLBACK_SECRET=...        # ถ้า WonDD มีลายเซ็น callback ให้ (ดีที่สุด)
-WONDD_CALLBACK_IPS=1.2.3.4       # IP ของ WonDD (แนะนำให้ใส่)
+# ถ้า WonDD มีลายเซ็น callback ให้ (ดีที่สุด)
+WONDD_CALLBACK_SECRET=...
+# IP ของ WonDD (แนะนำให้ใส่)
+WONDD_CALLBACK_IPS=1.2.3.4
 ```
 
 ### 2. แจ้ง WonDD เรื่อง URL รับผล (callback)
@@ -97,9 +102,10 @@ https://www.เว็บของคุณ.com/api/provider/callback/wondd?t=<�
 ### 6. เปลี่ยนเป็นโหมดจริง
 
 ```ini
-PROVIDERS=wondd          # หรือ hubzell,wondd ถ้าใช้ HubZell ด้วย (ดู docs/HUBZELL-INTEGRATION.md)
+PROVIDERS=wondd
 ```
 
+ถ้าใช้ HubZell ด้วย ให้ใส่ `PROVIDERS=hubzell,wondd` แทน (เรียงตามลำดับความสำคัญ — ดู [HUBZELL-INTEGRATION.md](HUBZELL-INTEGRATION.md))
 แล้วปิด-เปิดระบบใหม่ หน้าแอดมินจะแสดงป้าย **"ใช้งานจริง (WonDD)"** สีเขียว ถ้ายังตั้งค่าไม่ครบ จะเห็นรายการที่ขาดเป็นสีแดง และ **ระบบจะไม่รับรายการ ไม่ตัดเงินลูกค้า** จนกว่าจะครบ
 
 ### 7. ทดสอบด้วยยอดเล็กก่อนเปิดขาย

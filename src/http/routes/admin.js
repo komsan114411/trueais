@@ -46,7 +46,7 @@ router.get('/orders/export.csv', (req, res) => {
   const rows = orders.exportRows(req.query, { admin: true });
   sendCsv(res, `orders-admin-${bangkokDate()}.csv`, [
     { label: 'เลขที่รายการ', key: 'ref' },
-    { label: 'วันที่', value: (r) => new Date(r.created_at).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' }) },
+    { label: 'วันที่ (เวลาไทย)', value: (r) => require('../../lib/time').bangkokDateTime(r.created_at) },
     { label: 'ลูกค้า', key: 'user_name' },
     { label: 'เบอร์ลูกค้า', key: 'user_phone' },
     { label: 'ช่องทาง', key: 'source' },
@@ -61,7 +61,7 @@ router.get('/orders/export.csv', (req, res) => {
     { label: 'สถานะ', value: (r) => orders.STATUS_LABELS[r.status] },
     { label: 'เลขที่ผู้ให้บริการ', key: 'provider_txn_id' },
     { label: 'ข้อความ', key: 'provider_message' },
-  ], rows);
+  ], rows, { note: rows.truncated ? orders.EXPORT_NOTE : null });
 });
 
 router.get('/orders/:id', (req, res) => ok(res, orders.getAdmin(req.params.id)));
@@ -126,18 +126,21 @@ router.post('/users/:id/adjust', (req, res) => {
   const negative = raw.startsWith('-');
   const satang = parseBaht(negative ? raw.slice(1) : raw);
   // request_id: สร้างใหม่ทุกครั้งที่เปิดหน้าต่างปรับยอด — กดซ้ำ/ส่งซ้ำด้วยค่าเดิม = ไม่ปรับยอดซ้ำ
-  const r = wallet.adjust(Number(req.params.id), negative ? -satang : satang, b.note, req.user, req.ip, b.request_id);
+  const r = wallet.adjust(Number(req.params.id), negative ? -satang : satang, b.note, req.user, req.ip, b.request_id, { confirmLarge: b.confirm_large === true });
   ok(res, { balance: r.balance, existing: r.existing });
 });
 
-router.post('/users/:id/status', (req, res) => ok(res, { user: users.publicUser(users.setStatus(req.params.id, body(req).status, req.user, req.ip)) }));
-router.post('/users/:id/role', (req, res) => ok(res, { user: users.publicUser(users.setRole(req.params.id, body(req).role, req.user, req.ip)) }));
+// การกระทำกับบัญชีแอดมิน: ส่ง actor_password (+ actor_code ถ้าเปิด 2 ชั้น) มาด้วย ไม่งั้นได้ REAUTH_REQUIRED
+const reauth = (req) => ({ actor_password: body(req).actor_password, actor_code: body(req).actor_code });
+const sess = (req) => ({ sessionId: req.session?.id });
+router.post('/users/:id/status', async (req, res) => ok(res, { user: users.publicUser(await users.setStatus(req.params.id, body(req).status, req.user, req.ip, reauth(req), sess(req))) }));
+router.post('/users/:id/role', async (req, res) => ok(res, { user: users.publicUser(await users.setRole(req.params.id, body(req).role, req.user, req.ip, reauth(req), sess(req))) }));
 router.post('/users/:id/limit', (req, res) => ok(res, { user: users.publicUser(users.setDailyLimit(req.params.id, body(req).daily_limit_baht, req.user, req.ip)) }));
 router.post('/users/:id/password', async (req, res) => {
-  await users.resetPassword(req.params.id, body(req).password, req.user, req.ip);
+  await users.resetPassword(req.params.id, body(req).password, req.user, req.ip, reauth(req), sess(req));
   ok(res, { changed: true });
 });
-router.post('/users/:id/2fa/reset', (req, res) => ok(res, { user: users.publicUser(users.adminResetTotp(req.params.id, req.user, req.ip)) }));
+router.post('/users/:id/2fa/reset', async (req, res) => ok(res, { user: users.publicUser(await users.adminResetTotp(req.params.id, req.user, req.ip, reauth(req), sess(req))) }));
 
 router.get('/ledger', (req, res) => ok(res, wallet.ledger({ type: req.query.type, page: req.query.page, pageSize: req.query.pageSize })));
 router.get('/reconcile', (req, res) => ok(res, { mismatches: wallet.reconcile(), orders: wallet.reconcileOrders() }));
@@ -153,7 +156,10 @@ router.get('/deposits/:id/slip', (req, res) => {
 
 router.post('/deposits/:id/approve', (req, res) => {
   const b = body(req);
-  ok(res, deposits.approve(req.params.id, req.user, { amount: b.amount, note: b.note, noSlip: b.no_slip === true, confirmOver: b.confirm_over === true }, req.ip));
+  ok(res, deposits.approve(req.params.id, req.user, {
+    amount: b.amount, note: b.note, noSlip: b.no_slip === true, confirmOver: b.confirm_over === true,
+    slipVer: typeof b.slip_ver === 'string' ? b.slip_ver : undefined, reopen: b.reopen === true,
+  }, req.ip));
 });
 router.post('/deposits/:id/reject', (req, res) => ok(res, { deposit: deposits.reject(req.params.id, req.user, { note: body(req).note }, req.ip) }));
 
@@ -236,7 +242,7 @@ router.post('/providers/:name/sync', async (req, res) => ok(res, await providerM
 router.get('/providers/:name/catalog', (req, res) => ok(res, providerMap.listCatalog(providerName(req))));
 router.post('/providers/:name/mappings', (req, res) => ok(res, providerMap.upsertMapping(providerName(req), body(req), req.user, req.ip), 201));
 router.put('/providers/:name/mappings/:id', (req, res) => {
-  ok(res, providerMap.setEnabled(providerName(req), req.params.id, body(req).enabled === true, req.user, req.ip));
+  ok(res, providerMap.setEnabled(providerName(req), req.params.id, body(req).enabled === true, req.user, req.ip, { confirm: body(req).confirm === true }));
 });
 router.delete('/providers/:name/mappings/:id', (req, res) => {
   providerMap.removeMapping(providerName(req), req.params.id, req.user, req.ip);
@@ -255,7 +261,37 @@ router.post('/worker/run', async (req, res) => {
   ok(res, { done: true });
 });
 
+// ทดสอบ QR พร้อมเพย์ 1 บาท — ให้เจ้าของร้านสแกนด้วยแอปธนาคารแล้วตรวจชื่อผู้รับก่อนเปิดรับเงินจริง (ไม่ต้องโอน)
+router.post('/settings/promptpay-test', async (req, res) => {
+  const { normalizePromptPayId, formatPromptPayId, promptPaySvg } = require('../../lib/promptpay');
+  const raw = body(req).promptpay_id;
+  let id;
+  try {
+    id = normalizePromptPayId(raw === undefined || raw === null || raw === '' ? settings.get('promptpay_id') : raw);
+  } catch (err) {
+    throw E.validation(err.message, { field: 'promptpay_id' });
+  }
+  if (!id) throw E.validation('ยังไม่ได้ใส่หมายเลขพร้อมเพย์', { field: 'promptpay_id' });
+  const { svg } = await promptPaySvg(id, 100);
+  ok(res, { qr_svg: svg, target: formatPromptPayId(id), amount: 100 });
+});
+
+// ส่งข้อความทดสอบไป LINE / Telegram ตามที่ตั้งไว้ใน .env — รู้ผลทันทีว่าส่งถึงไหม
+router.post('/notify/test', async (req, res) => {
+  const r = await require('../../lib/notify').sendTest();
+  audit.log(req.user.id, 'system.notify_test', 'notify', null, { configured: r.configured, channels: r.channels.map((c) => `${c.name}:${c.ok ? 'ok' : 'fail'}`) }, req.ip);
+  ok(res, r);
+});
+
 router.get('/backups', (req, res) => ok(res, backup.list()));
+// ดาวน์โหลดไฟล์สำรอง (เก็บไว้นอกเครื่องนี้ — เครื่องเสีย/หายข้อมูลยังอยู่)
+router.get('/backups/:name/download', (req, res) => {
+  const file = backup.filePath(req.params.name);
+  if (!file) throw E.notFound('ไม่พบไฟล์สำรองนี้');
+  audit.log(req.user.id, 'system.backup_download', 'backup', req.params.name, null, req.ip);
+  settings.setInternal('_last_backup_download', db.nowIso());
+  res.download(file, req.params.name);
+});
 router.post('/backups', (req, res) => {
   const r = backup.backupNow();
   audit.log(req.user.id, 'system.backup', 'backup', r.name, { size: r.size }, req.ip);

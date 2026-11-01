@@ -6,6 +6,9 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 const { setupEnv, Client, waitFor, ADMIN_PASSWORD, CUSTOMER_PASSWORD } = require('./helpers');
 
+// รหัสสลิปที่แอดมินเห็น (ต้องส่งตอนอนุมัติ — กันลูกค้าเปลี่ยนสลิประหว่างแอดมินตรวจ)
+const slipVer = async (admin, id) => (await admin.get(`/api/admin/deposits?q=${id}`)).body.data.rows.find((d) => d.id === id)?.slip_ver;
+
 setupEnv();
 const config = require('../src/config');
 const { start } = require('../src/server');
@@ -389,9 +392,10 @@ test('สลิปใบเดียวใช้ซ้ำไม่ได้ + �
   assert.equal(dup.status, 409);
   assert.equal(dup.body.error.code, 'SLIP_USED');
 
-  assert.equal((await admin.post(`/api/admin/deposits/${d1.id}/approve`, { amount: '1000' })).status, 400, 'ยอดต่างต้องมีเหตุผล');
-  assert.equal((await admin.post(`/api/admin/deposits/${d1.id}/approve`, { amount: '999999', note: 'ทดสอบยอดเกิน' })).status, 400);
-  const ok = await admin.post(`/api/admin/deposits/${d1.id}/approve`, { amount: '100', note: 'ลูกค้าโอนเลขกลม' });
+  const v1 = await slipVer(admin, d1.id);
+  assert.equal((await admin.post(`/api/admin/deposits/${d1.id}/approve`, { amount: '1000', slip_ver: v1 })).status, 400, 'ยอดต่างต้องมีเหตุผล');
+  assert.equal((await admin.post(`/api/admin/deposits/${d1.id}/approve`, { amount: '999999', note: 'ทดสอบยอดเกิน', slip_ver: v1 })).status, 400);
+  const ok = await admin.post(`/api/admin/deposits/${d1.id}/approve`, { amount: '100', note: 'ลูกค้าโอนเลขกลม', slip_ver: v1 });
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   assert.equal(balanceOf(c.user.id), 10000);
   assert.equal((await c.post(`/api/deposits/${d2.id}/slip`, { image: PNG })).status, 409, 'สลิปที่อนุมัติแล้วใช้ซ้ำไม่ได้');
@@ -439,7 +443,8 @@ test('HTTP: ไม่รับข้อมูลแบบฟอร์ม, ปฏ
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: `identifier=admin%40test.local&password=${encodeURIComponent(ADMIN_PASSWORD)}`,
   });
-  assert.equal(form.status, 400, 'ต้องไม่รับข้อมูลแบบฟอร์ม HTML');
+  assert.equal(form.status, 415, 'ต้องไม่รับข้อมูลแบบฟอร์ม HTML (บอกให้ส่ง JSON)');
+  assert.equal((await form.json()).error.code, 'UNSUPPORTED_MEDIA_TYPE');
   const xs = await fetch(`${base}/api/auth/login`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'cross-site' },
     body: JSON.stringify({ identifier: 'admin@test.local', password: ADMIN_PASSWORD }),

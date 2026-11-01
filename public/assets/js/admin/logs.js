@@ -1,7 +1,7 @@
 // Log: การเชื่อมต่อผู้ให้บริการ / การกระทำในระบบ / webhook / สมุดบัญชีรวม
 import { html, raw, api, baht, dateTimeSec, phoneFmt, statusBadge, modal, toast, toastError, withLoading, on, qs, formData } from '../lib.js';
 import {
-  icon, ACTION_LABELS, PLOG_ACTIONS, LEDGER_LABELS, signedBaht, pagerHtml, bindPager, setQuery, emptyRow, opt, detailText, registry,
+  icon, PLOG_ACTIONS, LEDGER_LABELS, signedBaht, pagerHtml, bindPager, setQuery, emptyRow, opt, detailText, registry, actionLabel, actionOptions, isCliEntry,
 } from './common.js';
 import { providerLogItem } from './orderDetail.js';
 
@@ -34,8 +34,8 @@ async function auditTab(box, q) {
     <thead><tr><th>เวลา</th><th>ผู้กระทำ</th><th>การกระทำ</th><th>เป้าหมาย</th><th>รายละเอียด</th><th>IP</th></tr></thead>
     <tbody>${res.rows.length ? res.rows.map((a) => html`<tr>
       <td class="small nowrap">${dateTimeSec(a.created_at)}</td>
-      <td class="small">${a.actor_name || (a.actor_id ? `#${a.actor_id}` : html`<span class="muted">ระบบ</span>`)}${a.actor_email ? html`<span class="sub">${a.actor_email}</span>` : ''}</td>
-      <td class="small">${ACTION_LABELS[a.action] || a.action}<span class="sub mono">${a.action}</span></td>
+      <td class="small">${a.actor_name || (a.actor_id ? `#${a.actor_id}` : isCliEntry(a) ? html`<span class="pill">คำสั่งในเครื่อง (CLI)</span>` : html`<span class="muted">ระบบ</span>`)}${a.actor_email ? html`<span class="sub">${a.actor_email}</span>` : ''}</td>
+      <td class="small">${actionLabel(a.action)}<span class="sub mono">${a.action}</span></td>
       <td class="small mono">${a.target_type ? `${a.target_type}${a.target_id ? `:${a.target_id}` : ''}` : '-'}</td>
       <td class="small" style="max-width:420px;white-space:pre-line">${detailText(a.detail)}</td>
       <td class="small mono">${a.ip || ''}</td>
@@ -112,14 +112,15 @@ export async function render(el, params, query) {
   const filters = {
     provider: providerFilters(q),
     audit: html`<form class="card filter-card toolbar" data-filter>
-      <div class="field grow"><label>การกระทำ</label><select class="select" name="action">${opt('', 'ทั้งหมด', q.action)}${Object.entries(ACTION_LABELS).map(([k, l]) => opt(k, l, q.action))}</select></div>
+      <div class="field grow"><label for="lg-action">การกระทำ</label><select class="select" id="lg-action" name="action">${actionOptions(q.action)}</select>
+        <div class="help">เลือก "ทั้งหมดในหมวด" เพื่อดูทุกการกระทำของหมวดนั้น (เช่น ผู้ให้บริการ / จับคู่บริการ)</div></div>
       <div class="row"><button class="btn primary" type="submit">${icon('search')}ค้นหา</button></div></form>`,
     webhooks: html`<form class="card filter-card toolbar" data-filter>
       <div class="field"><label>สถานะ</label><select class="select" name="status">${opt('', 'ทั้งหมด', q.status)}${opt('pending', 'รอส่ง', q.status)}${opt('delivered', 'ส่งแล้ว', q.status)}${opt('failed', 'ล้มเหลว', q.status)}</select></div>
       <div class="row"><button class="btn primary" type="submit">${icon('search')}ค้นหา</button></div></form>`,
     ledger: html`<form class="card filter-card toolbar" data-filter>
       <div class="field"><label>ประเภท</label><select class="select" name="type">${opt('', 'ทั้งหมด', q.type)}${Object.entries(LEDGER_LABELS).map(([k, l]) => opt(k, l, q.type))}</select></div>
-      <div class="row"><button class="btn primary" type="submit">${icon('search')}ค้นหา</button><button class="btn" type="button" data-reconcile>${icon('check')}ตรวจความถูกต้องของยอดเงิน</button></div></form>`,
+      <div class="row"><button class="btn primary" type="submit">${icon('search')}ค้นหา</button><button class="btn" type="button" data-reconcile title="ตรวจความถูกต้องของยอดเงิน (กระเป๋า ↔ สมุดบัญชี ↔ สถานะรายการ)">${icon('check')}ตรวจยอดเงิน</button></div></form>`,
   };
   el.innerHTML = html`
     <div class="tabs" role="tablist">${TABS.map(([k, l]) => html`<button class="${k === tab ? 'active' : ''}" data-tab="${k}" role="tab" aria-selected="${k === tab}">${l}</button>`)}</div>

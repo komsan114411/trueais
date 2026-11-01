@@ -35,7 +35,7 @@ const SCHEMA = {
   deposit_min_baht: { type: 'number', default: 20, min: 1, max: 1000000, label: 'เติมเงินเข้ากระเป๋าขั้นต่ำ (บาท)', group: 'wallet', public: true },
   deposit_max_baht: { type: 'number', default: 50000, min: 1, max: 10000000, label: 'เติมเงินเข้ากระเป๋าสูงสุดต่อครั้ง (บาท)', group: 'wallet', public: true },
   deposit_unique_satang: { type: 'boolean', default: true, label: 'เพิ่มเศษสตางค์ให้ยอดโอนไม่ซ้ำกัน (ช่วยตรวจสลิปง่ายขึ้น)', group: 'wallet' },
-  promptpay_id: { type: 'string', default: '', label: 'หมายเลขพร้อมเพย์รับเงิน (เบอร์มือถือ หรือเลขบัตร 13 หลัก)', group: 'wallet', max: 20, pattern: '^$|^[0-9\\- ]{10,20}$' },
+  promptpay_id: { type: 'string', default: '', label: 'หมายเลขพร้อมเพย์รับเงิน (เบอร์มือถือ หรือเลขบัตร 13 หลัก)', group: 'wallet', max: 20 },
   promptpay_name: { type: 'string', default: '', label: 'ชื่อบัญชีพร้อมเพย์ (แสดงให้ลูกค้าตรวจสอบ)', group: 'wallet', public: true, max: 100 },
   bank_accounts: { type: 'text', default: '', label: 'บัญชีธนาคารสำหรับโอน (แสดงให้ลูกค้า)', group: 'wallet', public: true, max: 1000 },
 
@@ -83,14 +83,26 @@ function coerce(key, value) {
     throw E.validation(`${s.label}: ต้องเป็นเปิด/ปิด`, { field: key });
   }
   if (s.type === 'number') {
-    const n = typeof value === 'string' && value.trim() === '' ? NaN : Number(value);
+    // รับเฉพาะตัวเลข/ข้อความตัวเลข — ช่องว่าง, null, true/false ห้ามกลายเป็น 0 เงียบๆ (เช่น ปิดตัวกันรายการซ้ำโดยไม่ตั้งใจ)
+    const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value.trim()) : NaN;
     if (!Number.isFinite(n)) throw E.validation(`${s.label}: ต้องเป็นตัวเลข`, { field: key });
     if (!Number.isInteger(n)) throw E.validation(`${s.label}: ต้องเป็นจำนวนเต็ม`, { field: key });
     if (s.min !== undefined && n < s.min) throw E.validation(`${s.label}: ต้องไม่น้อยกว่า ${s.min}`, { field: key });
     if (s.max !== undefined && n > s.max) throw E.validation(`${s.label}: ต้องไม่เกิน ${s.max}`, { field: key });
     return n;
   }
+  if (value !== null && value !== undefined && typeof value !== 'string' && typeof value !== 'number') {
+    throw E.validation(`${s.label}: รูปแบบไม่ถูกต้อง`, { field: key });
+  }
   const str = String(value ?? '').trim();
+  if (key === 'promptpay_id') {
+    // ตรวจด้วยกฎเดียวกับตอนสร้าง QR — หมายเลขผิด = ลูกค้าไม่มี QR หรือโอนเงินเข้าบัญชีคนอื่น
+    try {
+      return require('../lib/promptpay').normalizePromptPayId(str);
+    } catch (err) {
+      throw E.validation(`${s.label}: ${err.message}`, { field: key });
+    }
+  }
   if (s.max && str.length > s.max) throw E.validation(`${s.label}: ยาวเกิน ${s.max} ตัวอักษร`, { field: key });
   if (s.pattern && !new RegExp(s.pattern).test(str)) throw E.validation(`${s.label}: รูปแบบไม่ถูกต้อง`, { field: key });
   return str;

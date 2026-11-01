@@ -60,7 +60,7 @@ function sales({ from, to, group = 'day' } = {}) {
   const g = Object.hasOwn(GROUPS, String(group)) ? GROUPS[group] : null;
   if (!g) throw E.validation('รูปแบบรายงานไม่ถูกต้อง');
   const defFrom = bangkokDate(new Date(Date.now() - 29 * 86400000));
-  const validDate = (d) => typeof d === 'string' && DATE_RE.test(d) && Number.isFinite(Date.parse(`${d}T00:00:00Z`));
+  const validDate = (d) => typeof d === 'string' && DATE_RE.test(d) && require('../lib/time').isValidDay(d);
   if ((from && !validDate(from)) || (to && !validDate(to))) throw E.validation('วันที่ต้องอยู่ในรูปแบบ ปปปป-ดด-วว');
   from = from || defFrom;
   to = to || bangkokDate();

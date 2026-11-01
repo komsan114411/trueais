@@ -32,6 +32,7 @@ const audit = require('./audit');
 const providers = require('../providers');
 const router = require('./router');
 const shops = require('./shops');
+const { customerMessage, customerEventMessage } = require('./orderText');
 
 const STATUS_LABELS = {
   pending: 'รอดำเนินการ',
@@ -116,8 +117,8 @@ const isScalar = (v) => v === undefined || v === null || typeof v === 'string' |
 
 function prepareItem(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw E.validation('ข้อมูลรายการไม่ถูกต้อง');
-  const type = input.type;
-  if (type !== 'topup' && type !== 'package') throw E.validation('กรุณาเลือกประเภทรายการ (เติมเงิน หรือ แพ็กเกจ)', { field: 'type' });
+  const type = typeof input.type === 'string' ? input.type.trim().toLowerCase() : input.type;
+  if (type !== 'topup' && type !== 'package') throw E.validation('กรุณาเลือกประเภทรายการ (topup = เติมเงิน หรือ package = แพ็กเกจ)', { field: 'type' });
   // ค่าต้องเป็นข้อความ/ตัวเลขเท่านั้น (กันส่ง array / object / true มาหลอกระบบ)
   for (const f of SCALAR_FIELDS) if (!isScalar(input[f])) throw E.validation('ข้อมูลรายการไม่ถูกต้อง', { field: f });
   if (input.productId !== undefined && input.productId !== null && input.productId !== '' && !/^\d{1,12}$/.test(String(input.productId))) {
@@ -143,7 +144,10 @@ function prepareItem(input) {
 
   let product = null;
   if (input.productId !== undefined && input.productId !== null && input.productId !== '') product = catalog.getProduct(Number(input.productId));
-  else if (input.productCode) product = catalog.getProductByCode(String(input.network || '').toUpperCase(), String(input.productCode));
+  else if (input.productCode) {
+    if (!input.network) throw E.validation('สั่งแพ็กเกจด้วยรหัสสินค้า ต้องระบุเครือข่าย (network) ด้วย', { field: 'network' });
+    product = catalog.getProductByCode(String(input.network).toUpperCase(), String(input.productCode).trim());
+  }
   if (!product) throw new AppError('PRODUCT_NOT_FOUND', 'ไม่พบแพ็กเกจที่เลือก', 404, { field: 'productId' });
   if (input.network && String(input.network).toUpperCase() !== product.network_code) {
     throw E.validation('แพ็กเกจนี้ไม่ใช่ของเครือข่ายที่เลือก', { field: 'network' });
@@ -177,9 +181,10 @@ function prepareChecked(input) {
 
 /** คำขอเดิม (รหัสอ้างอิงเดิม + ข้อมูลเดิม) หรือไม่ — ใช้คืนรายการเดิมโดยไม่ต้องตรวจเงื่อนไขอื่นซ้ำ */
 function sameRequest(ex, input) {
-  if (!input || input.type !== ex.type) return false;
+  if (!input || String(input.type || '').trim().toLowerCase() !== ex.type) return false;
   if (normalizePhone(input.phone) !== ex.phone) return false;
-  const shop = typeof input.shop === 'string' && input.shop && input.shop !== 'auto' ? input.shop.toLowerCase() : null;
+  const s0 = typeof input.shop === 'string' ? input.shop.trim().toLowerCase() : '';
+  const shop = s0 && s0 !== 'auto' ? s0 : null;
   if (shop !== (ex.shop || null)) return false;
   if (input.network && String(input.network).toUpperCase() !== ex.network_code) return false;
   if (ex.type === 'topup') {
@@ -218,6 +223,13 @@ function duplicateError(it, dup) {
     return E.conflict('DUPLICATE_IN_BATCH', `เบอร์ ${formatPhone(it.phone)} (${what}) ซ้ำกันในรายการที่ส่ง`, { index: it.index, phone: it.phone });
   }
   const ago = Math.max(1, Math.round((Date.now() - Date.parse(dup.created_at)) / 1000));
+  if (dup.status === 'pending' || dup.status === 'processing') {
+    return E.conflict(
+      'DUPLICATE_RECENT',
+      `เบอร์ ${formatPhone(it.phone)} มีรายการ ${what} ที่ยังรอผลอยู่ (เลขที่ ${dup.ref}) — ถ้าทำซ้ำตอนนี้ อาจได้รับ 2 ครั้งเมื่อรายการเดิมสำเร็จ หากต้องการทำซ้ำจริง กรุณากดยืนยันอีกครั้ง`,
+      { index: it.index, ref: dup.ref, phone: it.phone, secondsAgo: ago, waiting: true },
+    );
+  }
   return E.conflict(
     'DUPLICATE_RECENT',
     `เบอร์ ${formatPhone(it.phone)} เพิ่งทำรายการ ${what} ไปเมื่อ ${ago} วินาทีที่แล้ว (เลขที่ ${dup.ref}) หากต้องการทำซ้ำจริง กรุณากดยืนยันอีกครั้ง`,
@@ -303,19 +315,13 @@ function createOrders(user, inputs, ctx = {}) {
     }
 
     // 4) วงเงินต่อวัน
-    const limit = user.daily_limit !== null && user.daily_limit !== undefined ? user.daily_limit : Math.round(s.daily_limit_baht * 100);
     const adding = fresh.reduce((sum, it) => sum + it.price, 0);
-    if (limit > 0) {
-      const used = db.get(`SELECT COALESCE(SUM(price), 0) AS s FROM orders WHERE user_id = ? AND status IN ${ACTIVE} AND created_at >= ?`, user.id, bangkokDayStart()).s;
-      if (used + adding > limit) {
-        throw new AppError('DAILY_LIMIT', `เกินวงเงินต่อวัน ${fmt(limit)} บาท (วันนี้ใช้ไปแล้ว ${fmt(used)} บาท)`, 403, { limit, used });
-      }
-    }
+    assertDailyLimit(user, adding, s);
 
-    // 5) กันทำรายการซ้ำ (เบอร์ + ยอด/แพ็กเกจเดียวกัน ในเวลาใกล้กัน)
+    // 5) กันทำรายการซ้ำ (เบอร์ + ยอด/แพ็กเกจเดียวกัน ในเวลาใกล้กัน หรือรายการเดิมยังรอผลอยู่)
     //    รวบรวม "ทุก" รายการที่อาจซ้ำ แล้วแจ้งพร้อมกัน — ลูกค้าเห็นครบก่อนกดยืนยัน (ไม่ใช่เห็นแค่รายการแรก)
-    if (s.duplicate_window_sec > 0) {
-      const since = new Date(now - s.duplicate_window_sec * 1000).toISOString();
+    {
+      const since = new Date(now - Math.max(0, s.duplicate_window_sec) * 1000).toISOString();
       const seen = new Set();
       const dups = [];
       for (const it of fresh) {
@@ -324,9 +330,7 @@ function createOrders(user, inputs, ctx = {}) {
         seen.add(sig);
         if (it.confirmDuplicate) continue;
         if (inBatch) { dups.push({ it, dup: null }); continue; }
-        const dup = it.productId
-          ? db.get(`SELECT ref, created_at FROM orders WHERE user_id = ? AND phone = ? AND type = 'package' AND product_id = ? AND status IN ${ACTIVE} AND created_at >= ? ORDER BY id DESC LIMIT 1`, user.id, it.phone, it.productId, since)
-          : db.get(`SELECT ref, created_at FROM orders WHERE user_id = ? AND phone = ? AND type = 'topup' AND face_value = ? AND status IN ${ACTIVE} AND created_at >= ? ORDER BY id DESC LIMIT 1`, user.id, it.phone, it.faceValue, since);
+        const dup = findDuplicate(user.id, it, since);
         if (dup) dups.push({ it, dup });
       }
       if (dups.length) {
@@ -369,22 +373,39 @@ function createOrders(user, inputs, ctx = {}) {
 
 const createOrder = (user, input, ctx) => createOrders(user, [input], ctx)[0];
 
-/** ขอราคาก่อนยืนยัน (ไม่แตะเงิน) + เตือนล่วงหน้าถ้าเพิ่งทำรายการเดียวกัน */
+/**
+ * รายการเดิมที่อาจซ้ำ: เบอร์ + ยอด/แพ็กเกจเดียวกัน ที่ทำภายในช่วงเวลาที่ตั้งไว้ (สำเร็จ/รอผล)
+ * หรือรายการที่ "ยังรอผลอยู่" ไม่ว่าจะนานแค่ไหน (ทำซ้ำตอนนี้ = เสี่ยงได้ 2 ครั้งเมื่อรายการเดิมสำเร็จ)
+ */
+function findDuplicate(userId, it, since) {
+  const recent = `(status IN ('pending','processing') OR (status = 'success' AND created_at >= ?))`;
+  return it.productId
+    ? db.get(`SELECT ref, created_at, status FROM orders WHERE user_id = ? AND phone = ? AND type = 'package' AND product_id = ? AND ${recent} ORDER BY id DESC LIMIT 1`, userId, it.phone, it.productId, since)
+    : db.get(`SELECT ref, created_at, status FROM orders WHERE user_id = ? AND phone = ? AND type = 'topup' AND face_value = ? AND ${recent} ORDER BY id DESC LIMIT 1`, userId, it.phone, it.faceValue, since);
+}
+
+/** วงเงินต่อวัน (ใช้ทั้งตอนขอราคาและตอนสั่ง — ลูกค้ารู้ตั้งแต่หน้ายืนยัน) */
+function assertDailyLimit(user, adding, s = settings.all()) {
+  const limit = user.daily_limit !== null && user.daily_limit !== undefined ? user.daily_limit : Math.round(s.daily_limit_baht * 100);
+  if (!(limit > 0)) return;
+  const used = db.get(`SELECT COALESCE(SUM(price), 0) AS s FROM orders WHERE user_id = ? AND status IN ${ACTIVE} AND created_at >= ?`, user.id, bangkokDayStart()).s;
+  if (used + adding > limit) {
+    throw new AppError('DAILY_LIMIT', `เกินวงเงินต่อวัน ${fmt(limit)} บาท (วันนี้ใช้ไปแล้ว ${fmt(used)} บาท)`, 403, { limit, used });
+  }
+}
+
+/** ขอราคาก่อนยืนยัน (ไม่แตะเงิน) + เตือนล่วงหน้าถ้าเพิ่งทำรายการเดียวกัน / รายการเดิมยังรอผล */
 function quote(user, input) {
   assertSystemOpen();
   const it = prepareItem(input);
   planRoute(it); // แจ้งตั้งแต่หน้ายืนยันถ้ายังไม่มีผู้ให้บริการที่ทำรายการนี้ได้
   const s = settings.all();
+  assertDailyLimit(db.get('SELECT * FROM users WHERE id = ?', user.id) || user, it.price, s);
   let warning = null;
-  if (s.duplicate_window_sec > 0) {
-    const since = new Date(Date.now() - s.duplicate_window_sec * 1000).toISOString();
-    const dup = it.productId
-      ? db.get(`SELECT ref, created_at FROM orders WHERE user_id = ? AND phone = ? AND type = 'package' AND product_id = ? AND status IN ${ACTIVE} AND created_at >= ? ORDER BY id DESC LIMIT 1`, user.id, it.phone, it.productId, since)
-      : db.get(`SELECT ref, created_at FROM orders WHERE user_id = ? AND phone = ? AND type = 'topup' AND face_value = ? AND status IN ${ACTIVE} AND created_at >= ? ORDER BY id DESC LIMIT 1`, user.id, it.phone, it.faceValue, since);
-    if (dup) {
-      const err = duplicateError({ ...it, index: 0 }, dup);
-      warning = { code: err.code, message: err.message, ref: dup.ref };
-    }
+  const dup = findDuplicate(user.id, it, new Date(Date.now() - Math.max(0, s.duplicate_window_sec) * 1000).toISOString());
+  if (dup) {
+    const err = duplicateError({ ...it, index: 0 }, dup);
+    warning = { code: err.code, message: err.message, ref: dup.ref, waiting: Boolean(err.details?.waiting) };
   }
   const balance = db.get('SELECT balance FROM users WHERE id = ?', user.id).balance;
   return {
@@ -430,7 +451,7 @@ async function dispatch(orderId) {
     // มีเจ้าที่ทำได้แต่ถูกพักชั่วคราว → รอ (งานกู้คืนจะลองใหม่ หรือคืนเงินเมื่อค้างเกิน 10 นาที)
     if (router.candidates(item, { exclude: tried, ignoreBreaker: true }).length) return;
     failPending(order.id, tried.length
-      ? `ผู้ให้บริการทุกเจ้าไม่รับรายการนี้ (${tried.join(', ')})`
+      ? `ผู้ให้บริการทุกเจ้าไม่รับรายการนี้ (${tried.map((n) => shops.displayName(n)).join(', ')})`
       : 'ไม่มีผู้ให้บริการที่ทำรายการนี้ได้ในขณะนี้');
     return;
   }
@@ -1049,7 +1070,7 @@ function publicOrder(o) {
     shop: o.shop || null,
     shop_name: o.shop ? shops.displayName(o.shop) : null,
     handled_by: o.attempts ? shops.displayName(o.provider) : null,
-    message: o.provider_message,
+    message: customerMessage(o),
     provider_txn_id: o.provider_txn_id,
     reference: o.idempotency_key,
     created_at: o.created_at,
@@ -1071,6 +1092,9 @@ function adminOrder(o) {
     provider_label: providers.byName(o.provider)?.label || o.provider,
     attempts: o.attempts,
     provider_status: o.provider_status,
+    // แอดมินเห็นข้อความเต็มจากผู้ให้บริการ
+    message: o.provider_message,
+    provider_message: o.provider_message,
     product_code: o.product_code,
     needs_review: Boolean(o.needs_review),
     review_reason: o.review_reason,
@@ -1123,7 +1147,7 @@ function eventsFor(orderId, { admin = false } = {}) {
       status: e.status,
       source: e.source,
       source_label: SOURCE_LABELS[e.source] || e.source,
-      message: e.message,
+      message: admin ? e.message : customerEventMessage(e),
       created_at: e.created_at,
       ...(admin ? { data: e.data } : {}),
     }));
@@ -1141,7 +1165,7 @@ function getForUser(userId, ref) {
 }
 
 function getByReference(userId, reference, apiKeyId = 0) {
-  const o = findByKey(userId, apiKeyId, String(reference || ''));
+  const o = findByKey(userId, apiKeyId, String(reference || '').trim());
   if (!o) throw E.notFound('ไม่พบรายการ');
   return o;
 }
@@ -1182,18 +1206,27 @@ function getAdmin(idOrRef) {
   };
 }
 
+const EXPORT_MAX = 20000;
+const EXPORT_NOTE = `(แสดง ${EXPORT_MAX.toLocaleString('en-US')} รายการล่าสุด — เลือกช่วงวันที่ให้แคบลงเพื่อดาวน์โหลดส่วนที่เหลือ)`;
+
 function exportRows(f = {}, { admin = false, userId = null } = {}) {
   const { where, params } = buildFilters(f, { admin });
   if (userId) { where.unshift('o.user_id = ?'); params.unshift(userId); }
-  return db.all(
+  const rows = db.all(
     `SELECT o.*, u.name AS user_name, u.phone AS user_phone FROM orders o JOIN users u ON u.id = o.user_id
-     ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY o.id DESC LIMIT 20000`,
+     ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY o.id DESC LIMIT ${EXPORT_MAX + 1}`,
     ...params,
   );
+  // เกินจำนวนสูงสุด → ส่งเท่าที่กำหนด + บอกในไฟล์ว่าไม่ครบ (ไม่ตัดทิ้งเงียบๆ)
+  if (rows.length > EXPORT_MAX) {
+    rows.length = EXPORT_MAX;
+    rows.truncated = true;
+  }
+  return rows;
 }
 
 module.exports = {
-  STATUS_LABELS, FINAL, setEnqueue, createOrder, createOrders, quote, dispatch, applyResult, applyCallback, checkNow,
+  EXPORT_NOTE, STATUS_LABELS, FINAL, setEnqueue, createOrder, createOrders, quote, dispatch, applyResult, applyCallback, checkNow,
   recoverPending, pollDue, escalateStale, failPending,
   adminRecheck, adminMarkSuccess, adminMarkFailed, adminClearReview,
   publicOrder, adminOrder, listForUser, getForUser, getRowForUser, getByReference, listAdmin, getAdmin, exportRows, eventsFor,

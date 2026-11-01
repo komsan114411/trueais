@@ -445,6 +445,22 @@ const MIGRATIONS = [
   ALTER TABLE order_attempts ADD COLUMN resends INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE order_attempts ADD COLUMN not_found INTEGER NOT NULL DEFAULT 0;
   `,
+  // v6 — สลิปเติมเงินทุกใบที่เคยแนบ (เปลี่ยนสลิปแล้วใบเดิมยังถูกตรวจซ้ำได้) + รายการที่หมดเวลาอัตโนมัติ
+  `
+  CREATE TABLE deposit_slips (
+    id INTEGER PRIMARY KEY,
+    deposit_id INTEGER NOT NULL REFERENCES deposits(id),
+    hash TEXT NOT NULL,
+    file TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX ix_deposit_slips_hash ON deposit_slips(hash);
+  CREATE INDEX ix_deposit_slips_deposit ON deposit_slips(deposit_id);
+  INSERT INTO deposit_slips (deposit_id, hash, file, created_at)
+    SELECT id, slip_hash, slip_file, updated_at FROM deposits WHERE slip_hash IS NOT NULL;
+  ALTER TABLE deposits ADD COLUMN expired_at TEXT;
+  UPDATE deposits SET expired_at = updated_at WHERE status = 'cancelled' AND admin_note LIKE 'หมดเวลา%';
+  `,
 ];
 
 function migrate() {

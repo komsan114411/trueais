@@ -51,10 +51,14 @@ function securityHeaders(req, res, next) {
 
 function loadSession(req, res, next) {
   req.cookies = parseCookies(req.headers.cookie);
-  const s = users.getSession(req.cookies.sid);
+  const s = users.getSession(req.cookies.sid, { background: req.get('x-background') === '1' });
   if (s) {
     req.session = s;
     req.user = s.user;
+    // ระบบยืดอายุเซสชันให้ (ยังใช้งานอยู่) → ต่ออายุคุกกี้ในเบราว์เซอร์ด้วย ไม่งั้นจะหลุดตามอายุคุกกี้เดิม
+    if (s.extendedUntil) {
+      res.cookie('sid', req.cookies.sid, { httpOnly: true, sameSite: 'lax', secure: config.cookieSecure, maxAge: Math.max(60000, s.extendedUntil - Date.now()), path: '/' });
+    }
   }
   next();
 }
@@ -137,6 +141,7 @@ function notFoundApi(req, res) {
 function errorHandler(err, req, res, next) {
   if (res.headersSent) return;
   if (err instanceof AppError) {
+    if (err.status === 429 && err.details?.retryAfterSec && !res.getHeader('Retry-After')) res.setHeader('Retry-After', String(err.details.retryAfterSec));
     return res.status(err.status).json({ ok: false, error: { code: err.code, message: err.message, details: err.details } });
   }
   if (err?.type === 'entity.too.large') {

@@ -6,7 +6,7 @@
  *   - sync ครั้งถัดไป: ต้นทุนเปลี่ยน → อัปเดต, บริการหาย/ใช้ไม่ได้/ทำให้ขาดทุน → ปิดการจับคู่อัตโนมัติ + แจ้งแอดมิน
  */
 const db = require('../db');
-const { E } = require('../lib/errors');
+const { E, AppError } = require('../lib/errors');
 const { parseBaht, afterDiscount, fmt } = require('../lib/money');
 const { alertAdmin } = require('../lib/notify');
 const providers = require('../providers');
@@ -112,6 +112,46 @@ async function syncCatalog(name, actor, ip) {
   };
 }
 
+/**
+ * ตรวจว่าบริการของผู้ให้บริการ "น่าจะตรง" กับยอด/เครือข่าย/แพ็กเกจที่จับคู่ไหม (เทียบจากชื่อบริการและต้นทุน)
+ * คืนรายการคำเตือน — ว่าง = ดูถูกต้อง · มีคำเตือน = ต้องให้แอดมินยืนยันก่อนบันทึก/เปิดใช้
+ * (กันจับคู่ "AIS 50 บาท" กับยอด 100 บาท → ลูกค้าจ่าย 100 แต่ได้ 50)
+ */
+function mappingWarnings(m, c) {
+  if (!c) return [];
+  const w = [];
+  const sug = suggest(c);
+  const net = catalog.getNetwork(m.network_code);
+  const svc = c.service_name || c.service_id;
+  if (sug.network_code && sug.network_code !== m.network_code) {
+    w.push(`ชื่อบริการ "${svc}" ดูเหมือนเป็นของ ${sug.network_code} แต่จับคู่กับเครือข่าย ${net?.name || m.network_code}`);
+  }
+  if (m.kind === 'topup') {
+    if (sug.kind === 'package') w.push(`บริการ "${svc}" ดูเหมือนเป็นแพ็กเกจ ไม่ใช่การเติมเงิน`);
+    if (sug.face_value && sug.face_value !== m.face_value) {
+      w.push(`ชื่อบริการบอกยอด ${fmt(sug.face_value)} บาท แต่จับคู่กับยอด ${fmt(m.face_value)} บาท — ลูกค้าจะจ่ายตามยอด ${fmt(m.face_value)} บาท`);
+    }
+    const ratio = m.face_value ? m.cost / m.face_value : 1;
+    if (ratio < 0.85) {
+      w.push(`ต้นทุน ${fmt(m.cost)} บาท ต่ำกว่ายอดเติม ${fmt(m.face_value)} บาท ผิดปกติ (${Math.round(ratio * 100)}%) — อาจเป็นบริการยอดที่น้อยกว่า ลูกค้าจะได้เงินไม่ครบ`);
+    }
+  } else if (sug.kind === 'topup' && sug.face_value) {
+    w.push(`บริการ "${svc}" ดูเหมือนเป็นการเติมเงิน ${fmt(sug.face_value)} บาท ไม่ใช่แพ็กเกจ`);
+  }
+  return w;
+}
+
+/** บริการเดียวจับคู่ได้รายการเดียว (กันบริการ "AIS 50" ถูกใช้ทั้งยอด 50 และ 100) */
+function assertServiceFree(name, m) {
+  const other = db.all('SELECT * FROM provider_map WHERE provider = ? AND service_id = ?', name, m.service_id)
+    .find((x) => !(x.kind === m.kind && x.network_code === m.network_code && (x.face_value ?? null) === (m.face_value ?? null) && (x.product_id ?? null) === (m.product_id ?? null)));
+  if (!other) return;
+  const what = other.kind === 'topup' ? `เติมเงิน ${other.network_code} ${fmt(other.face_value)} บาท` : `แพ็กเกจ #${other.product_id} (${other.network_code})`;
+  throw new AppError('SERVICE_ALREADY_MAPPED', `บริการ ${m.service_id} จับคู่กับ ${what} อยู่แล้ว — บริการเดียวจับคู่ได้รายการเดียว (ลบการจับคู่เดิมก่อนถ้าต้องการย้าย)`, 409, {
+    existing: { id: other.id, kind: other.kind, network_code: other.network_code, face_value: other.face_value, product_id: other.product_id },
+  });
+}
+
 function mappingView(m) {
   const net = catalog.getNetwork(m.network_code);
   const product = m.product_id ? catalog.getProduct(m.product_id) : null;
@@ -127,6 +167,8 @@ function mappingView(m) {
     sell_price: sell,
     profit: sell - m.cost,
     loss: m.cost > sell,
+    margin_pct: sell > 0 ? Math.round(((sell - m.cost) * 1000) / sell) / 10 : 0,
+    check_warnings: mappingWarnings(m, db.get('SELECT * FROM provider_catalog WHERE provider = ? AND service_id = ?', m.provider, m.service_id)),
   };
 }
 
@@ -185,6 +227,11 @@ function upsertMapping(name, input, actor, ip) {
   const enabled = input.enabled === true;
   const sell = sellPrice(m);
   if (enabled && m.cost > sell) throw E.validation(`ต้นทุน ${fmt(m.cost)} บาท สูงกว่าราคาที่ขายลูกค้า ${fmt(sell)} บาท — เปิดใช้ไม่ได้ (จะขาดทุน)`, { field: 'enabled' });
+  assertServiceFree(name, m);
+  const warnings = mappingWarnings(m, db.get('SELECT * FROM provider_catalog WHERE provider = ? AND service_id = ?', name, m.service_id));
+  if (warnings.length && input.confirm !== true) {
+    throw new AppError('MAPPING_CHECK', 'การจับคู่นี้ดูไม่ตรงกัน — กรุณาตรวจก่อนบันทึก', 409, { warnings });
+  }
   const now = db.nowIso();
   const existing = m.kind === 'topup'
     ? db.get("SELECT id FROM provider_map WHERE provider = ? AND kind = 'topup' AND network_code = ? AND face_value = ?", name, m.network_code, m.face_value)
@@ -204,19 +251,22 @@ function upsertMapping(name, input, actor, ip) {
     );
     id = Number(r.lastInsertRowid);
   }
-  audit.log(actor.id, 'provider.map', 'provider_map', id, { provider: name, ...m, enabled }, ip);
+  audit.log(actor.id, 'provider.map', 'provider_map', id, { provider: name, ...m, enabled, ...(warnings.length ? { confirmed_warnings: warnings } : {}) }, ip);
   return mappingView(db.get('SELECT * FROM provider_map WHERE id = ?', id));
 }
 
-function setEnabled(name, id, enabled, actor, ip) {
+function setEnabled(name, id, enabled, actor, ip, { confirm = false } = {}) {
   mappedProvider(name);
   const m = db.get('SELECT * FROM provider_map WHERE id = ? AND provider = ?', Number(id), name);
   if (!m) throw E.notFound('ไม่พบการจับคู่นี้');
   if (enabled) {
-    const c = db.get('SELECT supported FROM provider_catalog WHERE provider = ? AND service_id = ?', name, m.service_id);
+    const c = db.get('SELECT * FROM provider_catalog WHERE provider = ? AND service_id = ?', name, m.service_id);
     if (!c || !c.supported) throw E.validation('บริการนี้ไม่มีแล้วหรือใช้ไม่ได้ — กด "ดึงรายการ" ใหม่ก่อน');
     const sell = sellPrice(m);
     if (m.cost > sell) throw E.validation(`ต้นทุน ${fmt(m.cost)} บาท สูงกว่าราคาที่ขายลูกค้า ${fmt(sell)} บาท — เปิดใช้ไม่ได้ (จะขาดทุน)`);
+    assertServiceFree(name, m);
+    const warnings = mappingWarnings(m, c);
+    if (warnings.length && !confirm) throw new AppError('MAPPING_CHECK', 'การจับคู่นี้ดูไม่ตรงกัน — กรุณาตรวจก่อนเปิดใช้', 409, { warnings });
   }
   db.run('UPDATE provider_map SET enabled = ?, updated_at = ? WHERE id = ?', enabled ? 1 : 0, db.nowIso(), m.id);
   audit.log(actor.id, enabled ? 'provider.map_enable' : 'provider.map_disable', 'provider_map', m.id, { provider: name, service_id: m.service_id }, ip);
@@ -257,11 +307,12 @@ function createProductFromService(name, serviceId, input, actor, ip) {
       enabled: false,
     }, actor, ip);
     db.run('UPDATE products SET origin = ? WHERE id = ?', name, created.id);
-    upsertMapping(name, { service_id: c.service_id, kind: 'package', network_code: net.code, product_id: created.id, enabled: false }, actor, ip);
+    // แอดมินเลือกสร้างแพ็กเกจจากบริการนี้เองโดยตรง → จับคู่ให้เลย (ยังปิดใช้ ตรวจราคาก่อนเปิด)
+    upsertMapping(name, { service_id: c.service_id, kind: 'package', network_code: net.code, product_id: created.id, enabled: false, confirm: true }, actor, ip);
     return catalog.getProduct(created.id);
   });
   audit.log(actor.id, 'provider.create_product', 'product', product.id, { provider: name, service_id: c.service_id }, ip);
   return { product, provider: p.label };
 }
 
-module.exports = { syncCatalog, listCatalog, upsertMapping, setEnabled, removeMapping, createProductFromService, suggest };
+module.exports = { syncCatalog, listCatalog, upsertMapping, setEnabled, removeMapping, createProductFromService, suggest, sellPrice };

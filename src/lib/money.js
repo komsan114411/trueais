@@ -26,7 +26,11 @@ const fmt = (satang) =>
 
 /** แปลง % (เช่น 3.25) เป็น basis point (325) */
 function percentToBp(value) {
-  const n = Number(value);
+  // ช่องว่าง / null / true-false = ยังไม่ได้กรอก (ห้ามกลายเป็น 0% เงียบๆ)
+  if ((typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '') {
+    throw E.validation('กรุณาระบุเปอร์เซ็นต์ 0 - 100');
+  }
+  const n = Number(String(value).trim());
   if (!Number.isFinite(n) || n < 0 || n > 100) throw E.validation('เปอร์เซ็นต์ต้องอยู่ระหว่าง 0 - 100');
   return Math.round(n * 100);
 }

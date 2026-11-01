@@ -2,7 +2,7 @@
 //  หลังบ้านแอดมิน — จุดเริ่มต้น: ตรวจสิทธิ์ → โครงหน้า → router
 // ═══════════════════════════════════════════════════════════════
 import { html, api, session, loadMe, createRouter, navigate, on, toast, toastError, withLoading, dateTimeSec, showFieldError, clearFieldErrors, verifyLoginMfa, confirmDialog } from './lib.js';
-import { icon, store } from './admin/common.js';
+import { icon, store, shortLabel } from './admin/common.js';
 import { render as dashboard } from './admin/dashboard.js';
 import { renderOrders, renderReview } from './admin/orders.js';
 import { render as deposits } from './admin/deposits.js';
@@ -29,12 +29,17 @@ const PAGES = {
   '/api-keys': { title: 'API ร้านค้า', icon: 'key', render: apiKeys },
   '/settings': { title: 'ตั้งค่าระบบ', icon: 'settings', render: settingsPage },
 };
+// ลิงก์ที่ไม่ใช่หน้าในหลังบ้าน: หน้า "บัญชีของฉัน" อยู่ในเว็บลูกค้า (บัญชีเดียวกัน) — ที่นั่นเปลี่ยนรหัสผ่าน / เปิดยืนยันตัวตน 2 ชั้น
+const EXTERNAL = {
+  account: { href: '/#/account', title: 'บัญชีของฉัน', sub: 'รหัสผ่าน / ยืนยันตัวตน 2 ชั้น', icon: 'shield' },
+};
 const NAV = [
   ['ภาพรวม', ['/', '/review']],
   ['งานประจำวัน', ['/orders', '/deposits', '/users']],
   ['จัดการร้าน', ['/catalog', '/providers', '/reports', '/api-keys']],
-  ['ระบบ', ['/logs', '/settings']],
+  ['ระบบ', ['/logs', '/settings', 'account']],
 ];
+const POLL_MS = 30000;
 
 let cleanup = null;
 let pollTimer = null;
@@ -103,8 +108,12 @@ function renderLogin(message = '') {
 
 function navHtml() {
   return NAV.map(([group, paths]) => html`<div class="nav-group">${group}</div>${paths.map((p) => {
+    const ext = EXTERNAL[p];
+    if (ext) {
+      return html`<a href="${ext.href}" target="_blank" rel="noopener" class="nav-ext" title="เปิดในแท็บใหม่ (หน้าเว็บลูกค้า บัญชีเดียวกับที่ใช้อยู่)">${icon(ext.icon)}<span class="nav-txt">${ext.title}<span class="nav-sub">${ext.sub}</span></span>${icon('external', 'ico ext')}</a>`;
+    }
     const pg = PAGES[p];
-    return html`<a href="#${p}" data-path="${p}">${icon(pg.icon)}<span>${pg.title}</span>${pg.count ? html`<span class="count hidden" data-count="${pg.count}"></span>` : ''}</a>`;
+    return html`<a href="#${p}" data-path="${p}">${icon(pg.icon)}<span class="nav-txt">${pg.title}</span>${pg.count ? html`<span class="count hidden" data-count="${pg.count}"></span>` : ''}</a>`;
   })}`);
 }
 
@@ -123,10 +132,10 @@ function renderShell() {
     <div class="adm-overlay" data-overlay></div>
     <div class="adm-main">
       <header class="adm-top">
-        <button class="btn ghost icon menu-btn" data-menu aria-label="เปิดเมนู">${icon('menu')}</button>
+        <button class="btn ghost icon menu-btn" data-menu aria-label="เปิดเมนู" aria-expanded="false">${icon('menu')}</button>
         <h1 data-title>แดชบอร์ด</h1>
         <span class="grow"></span>
-        <span data-mode></span>
+        <span class="top-mode" data-mode></span>
         <span class="top-user small muted">${u.name}</span>
       </header>
       <div class="adm-banners" data-banners></div>
@@ -135,9 +144,15 @@ function renderShell() {
   </div>`.toString();
 
   const shell = app.querySelector('[data-shell]');
-  const closeNav = () => shell.classList.remove('nav-open');
-  app.querySelector('[data-menu]').addEventListener('click', () => shell.classList.toggle('nav-open'));
+  const menuBtn = app.querySelector('[data-menu]');
+  const setNav = (open) => {
+    shell.classList.toggle('nav-open', open);
+    menuBtn.setAttribute('aria-expanded', String(open));
+  };
+  const closeNav = () => setNav(false);
+  menuBtn.addEventListener('click', () => setNav(!shell.classList.contains('nav-open')));
   app.querySelector('[data-overlay]').addEventListener('click', closeNav);
+  shell.addEventListener('keydown', (e) => { if (e.key === 'Escape' && shell.classList.contains('nav-open')) closeNav(); });
   on(app, 'click', '.adm-nav a', closeNav);
   app.querySelector('[data-logout]').addEventListener('click', async () => {
     try { await api.post('/api/auth/logout'); } catch { /* ไม่เป็นไร */ }
@@ -184,8 +199,10 @@ function updateStatus(d, catalog) {
   const ready = enabled.filter((x) => x.config?.ready);
   const mode = app.querySelector('[data-mode]');
   if (mode && p) {
-    const liveNames = enabled.filter((x) => x.live).map((x) => x.label).join(' + ');
-    mode.innerHTML = html`<a class="mode-badge ${p.live ? 'live' : 'mock'}" href="#/providers" title="${p.label}">${p.live ? `ใช้งานจริง (${liveNames || p.label})` : 'โหมดทดสอบ (MOCK)'}</a>`.toString();
+    const liveNames = enabled.filter((x) => x.live).map((x) => shortLabel(x)).join(' + ');
+    const long = p.live ? `ใช้งานจริง (${liveNames || shortLabel(p)})` : 'โหมดทดสอบ (MOCK)';
+    // จอแคบ: แสดงข้อความสั้น (ชื่อเจ้าเต็มอยู่ใน title และหน้าผู้ให้บริการ)
+    mode.innerHTML = html`<a class="mode-badge ${p.live ? 'live' : 'mock'}" href="#/providers" title="${long}"><span class="mb-long">${long}</span><span class="mb-short">${p.live ? 'ใช้งานจริง' : 'ทดสอบ'}</span></a>`.toString();
   }
   const site = app.querySelector('[data-site]');
   if (site && catalog?.settings?.site_name) site.textContent = catalog.settings.site_name;
@@ -235,15 +252,24 @@ async function checkStillAdmin(err) {
   } catch { /* เชื่อมต่อไม่ได้ → ลองรอบหน้า */ }
 }
 
+// รีเฟรชอัตโนมัติ = โหลดแบบเบื้องหลัง (X-Background: 1) ไม่นับเป็นการใช้งาน — เซสชันที่ไม่มีคนใช้จึงหมดอายุตามกำหนด
+const backgroundRefresh = () => store.refresh({ background: true }).catch(checkStillAdmin);
+// กลับมาที่แท็บนี้หลังจากไปที่อื่นนานกว่ารอบรีเฟรช → อัปเดตตัวเลขทันที (ไม่ต้องรอรอบถัดไป)
+const onVisible = () => {
+  if (document.visibilityState === 'visible' && session.user && Date.now() - store.lastAt > POLL_MS) backgroundRefresh();
+};
+
 function startPolling() {
   stopPolling();
   pollTimer = setInterval(() => {
-    if (document.visibilityState === 'visible') store.refresh().catch(checkStillAdmin);
-  }, 30000);
+    if (document.visibilityState === 'visible') backgroundRefresh();
+  }, POLL_MS);
+  document.addEventListener('visibilitychange', onVisible);
 }
 function stopPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
+  document.removeEventListener('visibilitychange', onVisible);
 }
 
 async function showPage(path, params, query) {
@@ -284,7 +310,18 @@ function startApp() {
   router.start();
 }
 
-window.addEventListener('session-expired', () => renderLogin('เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่'));
+window.addEventListener('session-expired', (e) => {
+  // ข้อความจากเซิร์ฟเวอร์ (เช่น ไม่มีการใช้งานนานเกินกำหนด) — ข้อความทั่วไป "กรุณาเข้าสู่ระบบ" ใช้ข้อความเดิมที่อธิบายมากกว่า
+  const why = String(e?.detail?.message || '').trim();
+  const generic = 'เซสชันหมดอายุ (หรือไม่มีการใช้งานนานเกินกำหนด) กรุณาเข้าสู่ระบบใหม่';
+  renderLogin(!why || why === 'กรุณาเข้าสู่ระบบ' ? generic : /เข้าสู่ระบบ/.test(why) ? why : `${why} — กรุณาเข้าสู่ระบบใหม่`);
+});
+
+// กันตัวเลขเปลี่ยนเองตอนเลื่อนหน้าจอด้วยล้อเมาส์ขณะเคอร์เซอร์อยู่ในช่องตัวเลข (เช่น ส่วนลด / ยอดเงิน)
+document.addEventListener('wheel', (e) => {
+  const t = e.target;
+  if (t instanceof HTMLInputElement && t.type === 'number' && document.activeElement === t) t.blur();
+}, { passive: true });
 
 (async function boot() {
   try {

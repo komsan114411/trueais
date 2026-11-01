@@ -6,6 +6,9 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 const { setupEnv, Client, waitFor, ADMIN_PASSWORD, CUSTOMER_PASSWORD } = require('./helpers');
 
+// รหัสสลิปที่แอดมินเห็น (ต้องส่งตอนอนุมัติ — กันลูกค้าเปลี่ยนสลิประหว่างแอดมินตรวจ)
+const slipVer = async (admin, id) => (await admin.get(`/api/admin/deposits?q=${id}`)).body.data.rows.find((d) => d.id === id)?.slip_ver;
+
 setupEnv();
 const { start } = require('../src/server');
 const db = require('../src/db');
@@ -335,10 +338,10 @@ test('เติมเงินเข้ากระเป๋า: QR พร้อ
   assert.equal(slip.status, 200, JSON.stringify(slip.body));
   const img = await fetch(`${base}/api/admin/deposits/${dep.id}/slip`, { headers: { Cookie: admin.cookie } });
   assert.equal(img.status, 200);
-  const ok1 = await admin.post(`/api/admin/deposits/${dep.id}/approve`, { note: 'ตรวจสลิปแล้ว' });
+  const ok1 = await admin.post(`/api/admin/deposits/${dep.id}/approve`, { note: 'ตรวจสลิปแล้ว', slip_ver: await slipVer(admin, dep.id) });
   assert.equal(ok1.status, 200, JSON.stringify(ok1.body));
   assert.equal(balanceOf(c.user.id), dep.amount);
-  const ok2 = await admin.post(`/api/admin/deposits/${dep.id}/approve`, {});
+  const ok2 = await admin.post(`/api/admin/deposits/${dep.id}/approve`, { slip_ver: await slipVer(admin, dep.id) });
   assert.equal(ok2.status, 400);
   assert.equal(balanceOf(c.user.id), dep.amount);
 });

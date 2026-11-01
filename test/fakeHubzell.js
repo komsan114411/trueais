@@ -27,7 +27,7 @@ const PRODUCTS = {
   HZ_AIS: {
     category: 'MOBILE_TOPUP', product_name: 'AIS เติมเงิน', currency: 'THB',
     inputs: [{ name: 'mobile', type: 'string', validation: '^0[0-9]{9}$', example: '0812345678' }],
-    services: [{ id: 'HZ_AIS_20', price: 19.5, name: 'AIS 20 บาท' }, { id: 'HZ_AIS_50', price: 48.75, name: 'AIS 50 บาท' }, { id: 'HZ_AIS_100', price: 97.5, name: 'AIS 100 บาท' }],
+    services: [{ id: 'HZ_AIS_20', price: 19.5, name: 'AIS 20 บาท' }, { id: 'HZ_AIS_25', price: 24.5, name: 'AIS 25 บาท' }, { id: 'HZ_AIS_50', price: 48.75, name: 'AIS 50 บาท' }, { id: 'HZ_AIS_100', price: 97.5, name: 'AIS 100 บาท' }],
   },
   HZ_TRUE: {
     category: 'MOBILE_TOPUP', product_name: 'TrueMove H เติมเงิน', currency: 'THB',

@@ -5,7 +5,8 @@
 function normalizePhone(input) {
   if (typeof input !== 'string' && typeof input !== 'number') return null;
   let s = String(input).replace(/[\s\-().]/g, '');
-  if (s.startsWith('+66')) s = '0' + s.slice(3);
+  if (s.startsWith('+66')) s = '0' + s.slice(3).replace(/^0(?=\d{9}$)/, '');
+  else if (s.startsWith('660') && s.length === 12) s = '0' + s.slice(3);
   else if (s.startsWith('66') && s.length === 11) s = '0' + s.slice(2);
   if (!/^0[689]\d{8}$/.test(s)) return null;
   return s;

@@ -1,6 +1,6 @@
-// แดชบอร์ด: ตัวเลขสำคัญวันนี้/เดือนนี้, กราฟ 14 วัน, ยอดตามเครือข่าย, รายการล่าสุด, การแจ้งเตือน
-import { html, api, baht, numFmt, dateTime, timeAgo, phoneFmt, statusBadge, netBadge, toast, toastError, withLoading, on } from '../lib.js';
-import { icon, store, successRate, pct, emptyRow, registry } from './common.js';
+// แดชบอร์ด: พร้อมเปิดร้านหรือยัง (รายการตรวจ), ตัวเลขสำคัญวันนี้/เดือนนี้, กราฟ 14 วัน, ยอดตามเครือข่าย, รายการล่าสุด, การแจ้งเตือน
+import { html, raw, api, baht, numFmt, dateTime, timeAgo, phoneFmt, statusBadge, netBadge, toast, toastError, withLoading, on } from '../lib.js';
+import { icon, store, successRate, pct, emptyRow, registry, safeHref, isCustomerLink, testNotify } from './common.js';
 import { createColumnChart, chartTable } from './chart.js';
 
 const stat = ({ label, value, sub, href, cls = '', extra = '' }) => (href
@@ -69,31 +69,86 @@ function byNetworkTable(rows) {
     </tr>`) : emptyRow(7, 'ยังไม่มีรายการเดือนนี้')}</tbody></table></div>`;
 }
 
+// บนมือถือแสดงเป็นการ์ด (คลาส cards-sm + o1..o5 = ลำดับในการ์ด, ซ้าย/ขวาสลับกัน)
 function recentTable(rows) {
-  return html`<div class="table-wrap"><table class="table">
+  return html`<div class="table-wrap"><table class="table cards-sm">
     <thead><tr><th>เวลา</th><th>รายการ</th><th>เบอร์</th><th class="num">ราคา</th><th>สถานะ</th></tr></thead>
     <tbody>${rows.length ? rows.map((r) => html`<tr class="clickable ${r.needs_review ? 'row-review' : ''}" data-ref="${r.ref}">
-      <td class="nowrap small">${dateTime(r.created_at)}<span class="sub">${r.user_name}</span></td>
-      <td><div class="item">${netBadge(r.network)}<span class="truncate">${r.product_name}</span></div><span class="sub mono">${r.ref}</span></td>
-      <td class="nowrap num">${phoneFmt(r.phone)}</td>
-      <td class="num">${baht(r.price)}</td>
-      <td>${statusBadge(r.status)}${r.needs_review ? html` <span class="flag">ตรวจ</span>` : ''}</td>
+      <td class="nowrap small o5 full">${dateTime(r.created_at)}<span class="sub">${r.user_name}</span></td>
+      <td class="o1"><div class="item">${netBadge(r.network)}<span class="truncate">${r.product_name}</span></div><span class="sub mono">${r.ref}</span></td>
+      <td class="nowrap num o3 left-sm bold-sm">${phoneFmt(r.phone)}</td>
+      <td class="num o4">${baht(r.price)}</td>
+      <td class="o2 r">${statusBadge(r.status)}${r.needs_review ? html` <span class="flag">ตรวจ</span>` : ''}</td>
     </tr>`) : emptyRow(5, 'ยังไม่มีรายการ')}</tbody></table></div>`;
 }
 
-/** รายการตรวจความปลอดภัยจากเซิร์ฟเวอร์ [{ level: 'warn' | 'info', message }] — เรื่องที่ควรแก้ขึ้นก่อน */
-function securityCard(items) {
+// ───────────── พร้อมเปิดร้านหรือยัง (รายการตรวจจากเซิร์ฟเวอร์) ─────────────
+// item = { key, level: 'warn' | 'info' | 'ok', message, link?, group?: 'setup' | 'security' }
+const SECURITY_KEYS = new Set(['config', 'bootstrap_password', 'admin_2fa', 'admins_2fa']);
+// ลิงก์สำรอง (เซิร์ฟเวอร์รุ่นที่ยังไม่ส่ง link มา) — รหัสผ่าน / ยืนยัน 2 ชั้น อยู่ที่หน้าบัญชีของฉัน (เว็บลูกค้า)
+function fallbackLink(key) {
+  if (key === 'admin_2fa' || key === 'bootstrap_password') return '/#/account';
+  if (key === 'backup') return '#/settings?focus=backup';
+  if (key === 'notify') return '#/settings?focus=notify';
+  if (key === 'admins_2fa') return '#/users?role=admin';
+  const m = /^provider_([a-z0-9_]+?)_map$/.exec(key || '');
+  if (m) return `#/providers?tab=map:${m[1]}`;
+  if (/^provider_[a-z0-9_]+$/.test(key || '') && !/_https$/.test(key)) return '#/providers';
+  return null;
+}
+const LEVEL_RANK = { warn: 0, info: 1, ok: 2 };
+const LEVEL_MARK = { warn: '!', info: 'i', ok: '✓' };
+const LEVEL_TEXT = { warn: 'ต้องแก้', info: 'แนะนำ', ok: 'เรียบร้อย' };
+
+function normalizeItems(items) {
+  return items.filter((x) => x && x.message).map((x) => {
+    const level = Object.hasOwn(LEVEL_RANK, x.level) ? x.level : 'info';
+    const group = x.group === 'security' || x.group === 'setup' ? x.group : SECURITY_KEYS.has(x.key) ? 'security' : 'setup';
+    return { ...x, level, group, href: safeHref(x.link) || safeHref(fallbackLink(x.key)) };
+  });
+}
+
+function checkItem(x) {
+  const ext = x.href && isCustomerLink(x.href);
+  const link = x.href && x.level !== 'ok'
+    ? html`<a class="btn sm ${x.level === 'warn' ? 'primary' : ''}" href="${x.href}" ${ext ? raw('target="_blank" rel="noopener"') : ''} title="${ext ? 'เปิดหน้าบัญชีของฉันในเว็บลูกค้า (บัญชีเดียวกันนี้) ในแท็บใหม่' : 'ไปหน้าที่แก้ได้'}">ไปแก้${ext ? icon('external') : ' →'}</a>`
+    : '';
+  const test = x.key === 'notify' && x.level === 'ok' ? html`<button type="button" class="btn sm" data-act="notify-test">${icon('bell')}ส่งข้อความทดสอบ</button>` : '';
+  return html`<li class="gl-${x.level}">
+    <span class="gl-mark" aria-hidden="true">${LEVEL_MARK[x.level]}</span>
+    <span class="gl-txt"><span class="sr-only">${LEVEL_TEXT[x.level]}: </span>${x.message}${ext && x.level !== 'ok' ? html`<span class="sub">แก้ที่หน้า "บัญชีของฉัน" ในเว็บลูกค้า (ใช้บัญชีเดียวกันนี้)</span>` : ''}</span>
+    ${link || test ? html`<span class="gl-act">${link}${test}</span>` : ''}
+  </li>`;
+}
+
+/** การ์ด "พร้อมเปิดร้านหรือยัง" — แยกเรื่องตั้งค่าร้าน กับเรื่องความปลอดภัย · open = null ให้ระบบเลือก (เปิดเมื่อมีเรื่องต้องแก้) */
+function goLiveCard(items, open) {
   if (!Array.isArray(items) || !items.length) return '';
-  const sorted = [...items].sort((a, b) => (a.level === 'warn' ? 0 : 1) - (b.level === 'warn' ? 0 : 1));
-  const warns = items.filter((x) => x.level === 'warn').length;
-  return html`<section class="card">
-    <div class="card-head"><h3>ตรวจความปลอดภัย</h3>${warns ? html`<span class="badge warning">ควรแก้ ${warns} เรื่อง</span>` : html`<span class="badge info">ข้อแนะนำ</span>`}</div>
-    <ul class="alert-list">${sorted.map((x) => html`<li>
-      <span class="when">${x.level === 'warn' ? html`<span class="badge warning plain">ควรแก้</span>` : html`<span class="badge info plain">แนะนำ</span>`}</span>
-      <span class="txt">${x.message}${x.key === 'admin_2fa'
-        ? html` · <a href="/#/account" target="_blank" rel="noopener">เปิดยืนยันตัวตน 2 ชั้น</a> <span class="muted">(หน้าบัญชีของฉันในเว็บลูกค้า ใช้บัญชีเดียวกันนี้)</span>` : ''}</span>
-    </li>`)}</ul>
-  </section>`;
+  const list = normalizeItems(items);
+  if (!list.length) return '';
+  const warns = list.filter((x) => x.level === 'warn').length;
+  const done = list.filter((x) => x.level === 'ok').length;
+  const total = list.length;
+  const ready = warns === 0;
+  const isOpen = open === null ? !ready : open;
+  const groups = [['setup', 'ตั้งค่าร้าน'], ['security', 'ความปลอดภัย']]
+    .map(([g, label]) => [label, list.filter((x) => x.group === g).sort((a, b) => LEVEL_RANK[a.level] - LEVEL_RANK[b.level])])
+    .filter(([, l]) => l.length);
+  const percent = Math.round((done / total) * 100);
+  return html`<details class="card flush golive ${ready ? 'is-ready' : 'not-ready'}" data-golive ${isOpen ? raw('open') : ''}>
+    <summary class="golive-head">
+      <span class="golive-ico" aria-hidden="true">${ready ? '✓' : '!'}</span>
+      <span class="grow"><span class="golive-title">พร้อมเปิดร้านหรือยัง?</span>
+        <span class="golive-sub">${ready
+          ? (done === total ? `พร้อมแล้ว — ผ่านครบทั้ง ${total} ข้อ` : `พร้อมเปิดร้าน — ไม่มีเรื่องต้องแก้ด่วน (มีข้อแนะนำ ${total - done} ข้อ)`)
+          : `ยังไม่พร้อม — ต้องแก้ ${warns} เรื่องก่อนรับลูกค้าจริง`}</span></span>
+      <span class="badge ${ready ? 'success' : 'warning'}" title="เรียบร้อย ${done} จาก ${total} ข้อ">${done}/${total}</span>
+    </summary>
+    <div class="golive-body">
+      <div class="golive-bar" role="progressbar" aria-label="ความพร้อมของร้าน" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${done}"><span style="width:${percent}%"></span></div>
+      ${groups.map(([label, l]) => html`<h4 class="golive-group">${label}</h4><ul class="golive-list">${l.map(checkItem)}</ul>`)}
+    </div>
+  </details>`;
 }
 
 function alertsList(rows) {
@@ -156,9 +211,11 @@ export async function render(el) {
     ],
   });
 
+  // เปิด/ปิดการ์ด "พร้อมเปิดร้าน" ตามที่ผู้ใช้กดไว้ (null = ให้ระบบเลือก) — คงไว้ระหว่างรีเฟรชอัตโนมัติ
+  let goLiveOpen = null;
   const draw = (d) => {
     if (!d || !el.isConnected) return;
-    const sec = securityCard(d.security).toString();
+    const sec = goLiveCard(d.security, goLiveOpen).toString();
     const secBox = el.querySelector('[data-security]');
     secBox.innerHTML = sec;
     secBox.classList.toggle('hidden', !sec); // ไม่มีเรื่องต้องแจ้ง → ไม่กินพื้นที่
@@ -190,6 +247,8 @@ export async function render(el) {
     chart.classList.toggle('hidden', showTable);
     btn.innerHTML = (showTable ? html`${icon('chart')}กราฟ` : html`${icon('table')}ตาราง`).toString();
   });
+  on(el, 'click', '[data-golive] > summary', (e, s) => { goLiveOpen = !s.parentElement.open; }); // คลิกก่อนสถานะเปลี่ยน
+  on(el, 'click', '[data-act="notify-test"]', (e, b) => testNotify(b));
   on(el, 'click', 'tr[data-ref]', (e, tr) => registry.openOrder(tr.dataset.ref, { onChange: () => store.refresh() }));
   on(el, 'click', '[data-act="balance"]', (e, btn) => {
     e.preventDefault();

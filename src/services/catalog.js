@@ -2,7 +2,7 @@
 // เครือข่าย (AIS / True / dtac), ยอดเติมเงิน, แพ็กเกจเน็ต และการคำนวณราคา
 const db = require('../db');
 const { E, AppError } = require('../lib/errors');
-const { afterDiscount, percentToBp, fmt } = require('../lib/money');
+const { afterDiscount, percentToBp, fmt, parseBaht } = require('../lib/money');
 const providers = require('../providers');
 const { alertAdmin } = require('../lib/notify');
 const audit = require('./audit');
@@ -118,7 +118,8 @@ function updateNetwork(code, patch, actor, ip) {
     const list = [...new Set(raw.filter((x) => x !== '' && x !== null).map(Number))].sort((a, b) => a - b);
     if (!list.length || list.length > 20) throw E.validation('ปุ่มยอดเติมต้องมี 1 - 20 ค่า');
     for (const v of list) {
-      if (!Number.isInteger(v) || v * 100 < min || v * 100 > max) throw E.validation(`ยอด ${v} บาท อยู่นอกช่วง ${min / 100} - ${max / 100} บาท`);
+      if (!Number.isInteger(v)) throw E.validation(`ปุ่มยอดเติมต้องเป็นจำนวนเต็มบาท (ไม่ใช่ ${Number.isFinite(v) ? v : 'ข้อความ'})`);
+      if (v * 100 < min || v * 100 > max) throw E.validation(`ยอด ${v} บาท อยู่นอกช่วง ${min / 100} - ${max / 100} บาท`);
     }
     f.topup_presets = JSON.stringify(list);
   } else if ('topup_min' in patch || 'topup_max' in patch) {
@@ -139,12 +140,60 @@ function updateNetwork(code, patch, actor, ip) {
   }
   const keys = Object.keys(f);
   if (!keys.length) return adminNetwork(n);
+  // การแก้ส่วนลด/ช่วงยอดอาจทำให้ร้านที่ตั้งส่วนลดไว้ขายต่ำกว่าต้นทุน หรือยอดของร้านแบบจับคู่บริการหายไป → แจ้งให้ยืนยันก่อน
+  const impacts = networkImpacts(n, { ...n, ...f, topup_presets: n.topup_presets });
+  if (impacts.length && patch.confirm_impact !== true) {
+    throw new AppError('NETWORK_IMPACT', 'การแก้ไขนี้มีผลกับร้าน/ยอดที่ขายอยู่ — กรุณาตรวจรายการแล้วยืนยันอีกครั้ง', 409, { impacts });
+  }
   db.run(`UPDATE networks SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE code = ?`, ...keys.map((k) => f[k]), db.nowIso(), n.code);
-  audit.log(actor.id, 'network.update', 'network', n.code, f, ip);
+  audit.log(actor.id, 'network.update', 'network', n.code, impacts.length ? { ...f, impacts } : f, ip);
   return adminNetwork(getNetwork(n.code));
 }
 
+/**
+ * ผลกระทบของการแก้เครือข่ายต่อร้าน: ส่วนลดของร้านจะเกินสูงสุดใหม่ (ขายต่ำกว่าต้นทุน = ระบบข้ามร้านนั้น)
+ * หรือยอดของร้านแบบจับคู่บริการที่จะขายไม่ได้แล้ว — คืนรายการข้อความ (ว่าง = ไม่กระทบ)
+ */
+function networkImpacts(before, after) {
+  const shops = require('./shops'); // โหลดตอนใช้ (กัน require วนกัน)
+  const out = [];
+  for (const code of providers.configured()) {
+    const name = shops.displayName(code);
+    const own = Boolean(db.get('SELECT 1 AS x FROM shop_networks WHERE provider = ? AND network_code = ?', code, before.code));
+    const overBefore = shops.discountBp(code, before) > shops.maxDiscountBp(code, before);
+    const bpAfter = shops.discountBp(code, after);
+    const maxAfter = shops.maxDiscountBp(code, after);
+    if (bpAfter > maxAfter && !overBefore) {
+      out.push(`${name}: ส่วนลด ${after.name} ${bpAfter / 100}%${own ? '' : ' (ค่ามาตรฐาน)'} จะเกินสูงสุดใหม่ ${maxAfter / 100}% — ลูกค้าจะสั่งผ่านร้านนี้ไม่ได้ (ระบบไม่ขายต่ำกว่าต้นทุน)`);
+    }
+    const a0 = shops.mappedAmounts(code, before);
+    const a1 = shops.mappedAmounts(code, after);
+    if (a0 && a1) {
+      const lost = a0.filter((a) => !a1.includes(a));
+      if (lost.length) out.push(`${name}: ยอด ${lost.map((a) => (a / 100).toLocaleString('th-TH')).join(', ')} บาท ของ ${after.name} จะขายไม่ได้ (ต้นทุนเกินราคาขายใหม่ หรืออยู่นอกช่วงยอด)`);
+    }
+  }
+  return out;
+}
+
 // ───────────── แพ็กเกจ ─────────────
+
+/**
+ * เลขที่แพ็กเกจถัดไป — ไม่นำเลขของแพ็กเกจที่ลบไปแล้วกลับมาใช้ซ้ำ
+ * (กันประวัติการสั่งซื้อ/การจับคู่บริการ/ลิงก์เก่า ชี้ไปที่แพ็กเกจใหม่ผิดตัว)
+ */
+function nextProductId() {
+  const settings = require('./settings');
+  const max = db.get('SELECT COALESCE(MAX(id), 0) AS m FROM products').m;
+  return Math.max(max, Number(settings.getInternal('_product_id_hwm', 0)) || 0) + 1;
+}
+function rememberDeletedId(id) {
+  const settings = require('./settings');
+  if (id > (Number(settings.getInternal('_product_id_hwm', 0)) || 0)) settings.setInternal('_product_id_hwm', id);
+}
+/** รายการของแพ็กเกจนี้ที่ยังไม่จบ (ห้ามลบ/แก้รหัสระหว่างนี้ — ระบบใช้ข้อมูลแพ็กเกจตอนส่งรายการ) */
+const activeOrdersOf = (productId) => db.get("SELECT COUNT(*) AS c FROM orders WHERE product_id = ? AND status IN ('pending','processing')", productId).c;
+const IN_USE_MSG = 'แพ็กเกจนี้มีรายการที่กำลังดำเนินการอยู่ — รอให้รายการเสร็จก่อน (ระหว่างนี้ปิดขายไว้ได้)';
 
 const getProduct = (id) => db.get('SELECT * FROM products WHERE id = ?', id);
 const getProductByCode = (network, code) => db.get('SELECT * FROM products WHERE network_code = ? AND provider_code = ?', network, code);
@@ -172,8 +221,13 @@ function validateProduct(data, existing = null) {
     out.validity_days = d;
   }
   // ราคา: รับเป็นบาทจากฟอร์ม (price_baht / cost_baht) หรือสตางค์ (price / cost)
-  const priceSatang = 'price_baht' in data ? Math.round(Number(data.price_baht) * 100) : pick('price');
-  const costSatang = 'cost_baht' in data ? Math.round(Number(data.cost_baht) * 100) : pick('cost');
+  // ช่องว่าง/ข้อความแปลก = แจ้งให้กรอกใหม่ (ห้ามกลายเป็น 0 เงียบๆ — ต้นทุน 0 ทำให้ระบบกันขาดทุน/รายงานกำไรผิดทั้งหมด)
+  const baht = (v, field, label) => {
+    if (v === null || v === undefined || String(v).trim() === '') throw E.validation(`กรุณากรอก${label}`, { field });
+    try { return parseBaht(typeof v === 'number' ? v : String(v).trim(), field); } catch { throw E.validation(`${label}ไม่ถูกต้อง (เช่น 199 หรือ 1,299.50)`, { field }); }
+  };
+  const priceSatang = 'price_baht' in data ? baht(data.price_baht, 'price_baht', 'ราคาขาย') : pick('price');
+  const costSatang = 'cost_baht' in data ? baht(data.cost_baht, 'cost_baht', 'ต้นทุน') : pick('cost');
   if (!Number.isSafeInteger(priceSatang) || priceSatang <= 0 || priceSatang > 10000000) throw E.validation('ราคาขายไม่ถูกต้อง', { field: 'price_baht' });
   if (!Number.isSafeInteger(costSatang) || costSatang < 0) throw E.validation('ต้นทุนไม่ถูกต้อง', { field: 'cost_baht' });
   if (costSatang > priceSatang) throw E.validation('ต้นทุนมากกว่าราคาขาย จะขาดทุนทุกรายการ', { field: 'cost_baht' });
@@ -201,13 +255,14 @@ function createProduct(data, actor, ip) {
   const p = validateProduct(data);
   if (getProductByCode(p.network_code, p.provider_code)) throw E.conflict('PRODUCT_EXISTS', 'มีแพ็กเกจรหัสนี้ในเครือข่ายนี้แล้ว', { field: 'provider_code' });
   const now = db.nowIso();
-  const r = db.run(
-    `INSERT INTO products (network_code, provider_code, name, description, category, data_label, validity_days, price, cost, enabled, is_demo, sort, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
-    p.network_code, p.provider_code, p.name, p.description, p.category, p.data_label, p.validity_days, p.price, p.cost, p.enabled, p.sort, now, now,
+  const id = nextProductId();
+  db.run(
+    `INSERT INTO products (id, network_code, provider_code, name, description, category, data_label, validity_days, price, cost, enabled, is_demo, sort, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+    id, p.network_code, p.provider_code, p.name, p.description, p.category, p.data_label, p.validity_days, p.price, p.cost, p.enabled, p.sort, now, now,
   );
-  audit.log(actor.id, 'product.create', 'product', Number(r.lastInsertRowid), p, ip);
-  return getProduct(Number(r.lastInsertRowid));
+  audit.log(actor.id, 'product.create', 'product', id, p, ip);
+  return getProduct(id);
 }
 
 function updateProduct(id, data, actor, ip) {
@@ -216,6 +271,14 @@ function updateProduct(id, data, actor, ip) {
   const p = validateProduct(data, existing);
   const dup = getProductByCode(p.network_code, p.provider_code);
   if (dup && dup.id !== existing.id) throw E.conflict('PRODUCT_EXISTS', 'มีแพ็กเกจรหัสนี้ในเครือข่ายนี้แล้ว', { field: 'provider_code' });
+  const codeChanged = p.provider_code !== existing.provider_code;
+  const netChanged = p.network_code !== existing.network_code;
+  if ((codeChanged || netChanged) && activeOrdersOf(existing.id)) {
+    throw E.conflict('PRODUCT_IN_USE', IN_USE_MSG, { field: codeChanged ? 'provider_code' : 'network_code' });
+  }
+  if (netChanged && db.get("SELECT 1 AS x FROM provider_map WHERE kind = 'package' AND product_id = ?", existing.id)) {
+    throw E.conflict('PRODUCT_MAPPED', 'แพ็กเกจนี้จับคู่กับบริการของผู้ให้บริการไว้ — ลบการจับคู่ก่อนเปลี่ยนเครือข่าย', { field: 'network_code' });
+  }
   // ถ้าแก้รหัสแพ็กเกจตัวอย่างให้เป็นรหัสจริง จะไม่ถือเป็นตัวอย่างอีกต่อไป
   const isDemo = existing.is_demo && p.provider_code === existing.provider_code ? 1 : 0;
   db.run(
@@ -230,14 +293,31 @@ function updateProduct(id, data, actor, ip) {
 function deleteProduct(id, actor, ip) {
   const p = getProduct(Number(id));
   if (!p) throw E.notFound('ไม่พบแพ็กเกจ');
-  db.run('DELETE FROM products WHERE id = ?', p.id);
-  audit.log(actor.id, 'product.delete', 'product', p.id, { name: p.name, provider_code: p.provider_code }, ip);
+  if (activeOrdersOf(p.id)) throw E.conflict('PRODUCT_IN_USE', IN_USE_MSG);
+  let mappings = 0;
+  db.tx(() => {
+    // ลบการจับคู่บริการของแพ็กเกจนี้ด้วย (ไม่ให้ค้างไปผูกกับแพ็กเกจอื่น)
+    mappings = db.run("DELETE FROM provider_map WHERE kind = 'package' AND product_id = ?", p.id).changes;
+    db.run('DELETE FROM products WHERE id = ?', p.id);
+    rememberDeletedId(p.id);
+  });
+  audit.log(actor.id, 'product.delete', 'product', p.id, { name: p.name, provider_code: p.provider_code, mappings_removed: mappings }, ip);
 }
 
 function deleteDemoProducts(actor, ip) {
-  const r = db.run('DELETE FROM products WHERE is_demo = 1');
-  audit.log(actor.id, 'product.delete_demo', 'product', null, { deleted: r.changes }, ip);
-  return r.changes;
+  const demo = db.all('SELECT id FROM products WHERE is_demo = 1');
+  const busy = demo.filter((p) => activeOrdersOf(p.id));
+  if (busy.length) throw E.conflict('PRODUCT_IN_USE', `แพ็กเกจตัวอย่าง ${busy.length} รายการยังมีรายการที่กำลังดำเนินการอยู่ — รอให้เสร็จก่อนลบ`);
+  let deleted = 0;
+  db.tx(() => {
+    for (const p of demo) {
+      db.run("DELETE FROM provider_map WHERE kind = 'package' AND product_id = ?", p.id);
+      rememberDeletedId(p.id);
+    }
+    deleted = db.run('DELETE FROM products WHERE is_demo = 1').changes;
+  });
+  audit.log(actor.id, 'product.delete_demo', 'product', null, { deleted }, ip);
+  return deleted;
 }
 
 /** ดึงรายการแพ็กเกจจากผู้ให้บริการ: ของใหม่จะถูกเพิ่มแบบ "ปิดขาย" ให้แอดมินตรวจราคาก่อนเปิด */
@@ -270,10 +350,10 @@ async function syncProducts(actor, ip) {
         updated++;
       } else {
         db.run(
-          `INSERT INTO products (network_code, provider_code, name, category, validity_days, price, cost, enabled, is_demo, created_at, updated_at)
-           VALUES (?, ?, ?, 'เน็ต', ?, ?, ?, 0, 0, ?, ?)`,
+          `INSERT INTO products (id, network_code, provider_code, name, category, validity_days, price, cost, enabled, is_demo, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'เน็ต', ?, ?, ?, 0, 0, ?, ?)`,
           // เก็บต้นทุนจริงเสมอ (ถ้าสูงกว่าราคาขาย แอดมินจะเปิดขายไม่ได้จนกว่าจะตั้งราคาใหม่)
-          item.networkCode, item.providerCode, item.name.slice(0, 120), validity, item.price, item.cost, now, now,
+          nextProductId(), item.networkCode, item.providerCode, item.name.slice(0, 120), validity, item.price, item.cost, now, now,
         );
         added++;
       }

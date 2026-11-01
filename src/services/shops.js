@@ -61,9 +61,10 @@ function sellsPackage(code, product) {
 
 /** ตรวจร้านที่ลูกค้าส่งมา — ไม่ระบุ / 'auto' = ให้ระบบเลือก (คืน null) */
 function resolve(code) {
-  if (code === undefined || code === null || code === '' || code === 'auto') return null;
+  if (code === undefined || code === null || code === '') return null;
   if (typeof code !== 'string') throw E.validation('ร้านที่เลือกไม่ถูกต้อง', { field: 'shop' });
-  const c = code.toLowerCase();
+  const c = code.trim().toLowerCase();
+  if (c === '' || c === 'auto') return null;
   if (!visible().includes(c)) throw new AppError('SHOP_UNAVAILABLE', 'ร้านที่เลือกไม่เปิดให้บริการในขณะนี้ กรุณาเลือกร้านอื่น', 400, { field: 'shop' });
   return c;
 }

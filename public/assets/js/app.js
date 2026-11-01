@@ -1,6 +1,6 @@
 // หน้าเว็บลูกค้า — จุดเริ่มต้น: โหลดข้อมูล → ตั้ง router → แสดงหน้า
 import { $, html, setHTML, createRouter, navigate, loadMe, qs, toast, on } from './lib.js';
-import { state, loadCatalog, setUser, onChange } from './app/state.js';
+import { state, loadCatalog, setUser, onChange, clearDraft } from './app/state.js';
 import { renderShell } from './app/shell.js';
 import { skeletonPage, errorView } from './app/ui.js';
 import { icon } from './app/icons.js';
@@ -37,6 +37,7 @@ let cleanups = [];
 function page(fn) {
   return async (params, query, info) => {
     cleanups.splice(0).forEach((f) => { try { f(); } catch { /* ignore */ } });
+    document.body.classList.remove('typing'); // ช่องที่โฟกัสอยู่ถูกลบไปพร้อมหน้าเก่า
     const id = ++navId;
     const main = $('#view');
     const view = document.createElement('div');
@@ -74,8 +75,28 @@ function bootError(err) {
   </div>`);
 }
 
+/** ช่องที่เปิดแป้นพิมพ์บนมือถือ (ไม่รวมปุ่ม/ช่องติ๊ก) */
+const isTypingField = (el) => el instanceof HTMLElement && (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'
+  || (el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'file', 'range', 'color', 'reset', 'image'].includes(el.type)));
+
 async function boot() {
   on(document.body, 'click', '[data-reload]', () => location.reload());
+  // กำลังพิมพ์บนมือถือ → ซ่อนเมนูล่าง/แถบชำระเงิน (ไม่ให้ลอยขึ้นมาบังช่องที่กำลังกรอกเหนือแป้นพิมพ์)
+  document.addEventListener('focusin', (e) => { if (isTypingField(e.target)) document.body.classList.add('typing'); });
+  document.addEventListener('focusout', () => {
+    setTimeout(() => { if (!isTypingField(document.activeElement)) document.body.classList.remove('typing'); }, 60);
+  });
+  // แตะเมนูของหน้าที่เปิดอยู่ (หน้าเติมเงิน/แพ็กเกจ) → เลื่อนขึ้นบนสุด ไม่ล้างข้อมูลที่กรอกไว้
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('.tabbar a, .nav-links a');
+    if (!a) return;
+    const target = (a.getAttribute('href') || '').replace(/^#/, '').split('?')[0];
+    const here = (location.hash.slice(1) || '/').split('?')[0];
+    if (target === here && (here === '/topup' || here === '/packages')) {
+      e.preventDefault();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  });
   try {
     const [, user] = await Promise.all([loadCatalog(true), loadMe()]);
     state.user = user;
@@ -109,6 +130,13 @@ async function boot() {
   });
 
   onChange(() => renderShell());
+  // "ไม่ทำแล้ว" บนแถบรายการที่ค้างไว้ (หน้าแรก / กระเป๋าเงิน)
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-draft-dismiss]');
+    if (!b) return;
+    clearDraft();
+    b.closest('[data-draft]')?.remove();
+  });
   let expiredAt = 0;
   window.addEventListener('session-expired', () => {
     setUser(null);

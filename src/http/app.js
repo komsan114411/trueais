@@ -28,11 +28,18 @@ function createApp() {
   app.disable('x-powered-by');
   app.set('trust proxy', parseTrustProxy(config.trustProxy));
   app.set('etag', 'strong');
+  // ?a=1&a=2 → a = '1' เสมอ (ค่าเป็นข้อความเท่านั้น ไม่มี array/object ที่ทำให้คำสั่งฐานข้อมูลพัง)
+  app.set('query parser', (str) => {
+    const out = Object.create(null);
+    for (const [k, v] of new URLSearchParams(str || '')) if (!(k in out)) out[k] = v;
+    return out;
+  });
 
   app.use(mw.securityHeaders);
   app.use('/api', mw.rateLimit({ windowMs: 60000, max: config.limits.apiPerMinute }));
   app.use('/api', (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
+    require('../services/securityCheck').noteRequest(req); // จำว่ามี proxy อยู่หน้าเว็บไหม (เตือนให้ตั้ง TRUST_PROXY)
     next();
   });
 
@@ -42,7 +49,14 @@ function createApp() {
   // รับเฉพาะ JSON (ไม่รับฟอร์ม HTML) — เว็บอื่นจึงส่งฟอร์มปลอมเข้ามาไม่ได้ (เบราว์เซอร์ต้องขออนุญาต CORS ก่อนส่ง JSON)
   const smallJson = express.json({ limit: '200kb' });
   const slipJson = express.json({ limit: '5mb' });
-  app.use((req, res, next) => (/^\/api\/deposits\/\d+\/slip$/.test(req.path) ? slipJson : smallJson)(req, res, next));
+  app.use((req, res, next) => {
+    // ส่งข้อมูลมาแต่ไม่ใช่ JSON (เช่น ฟอร์ม) → บอกให้ชัด แทนที่จะอ่านเป็นข้อมูลว่างแล้วแจ้งว่า "ขาดข้อมูล"
+    const hasBody = Number(req.headers['content-length'] || 0) > 0 || Boolean(req.headers['transfer-encoding']);
+    if (req.path.startsWith('/api/') && hasBody && !['GET', 'HEAD'].includes(req.method) && !req.is('application/json')) {
+      return res.status(415).json({ ok: false, error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: 'ต้องส่งข้อมูลเป็น JSON (Content-Type: application/json)' } });
+    }
+    return (/^\/api\/deposits\/\d+\/slip$/.test(req.path) ? slipJson : smallJson)(req, res, next);
+  });
 
   app.use('/api/v1', require('./routes/merchant'));
 

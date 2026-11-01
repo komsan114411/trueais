@@ -1,8 +1,11 @@
 // ขั้นตอนยืนยันก่อนตัดเงิน (ใช้กับเติมเงิน / แพ็กเกจ / ทำรายการซ้ำ)
 // กันความผิดพลาด: แสดงเบอร์ตัวใหญ่ + ต้องติ๊กยืนยัน + idempotency key กันตัดเงินซ้ำ + กันปิดหน้าต่างระหว่างส่ง
-import { html, raw, api, baht, phoneFmt, uuid, withLoading, modal, toast, toastError, navigate, setHTML, showFieldError } from '../lib.js';
-import { state, refreshUser, networkOf, orderBlockReason, safeColor, loadCatalog, rememberShop } from './state.js';
-import { netTag, alertBox } from './ui.js';
+import { html, api, baht, phoneFmt, uuid, withLoading, modal, toast, toastError, navigate, setHTML, showFieldError } from '../lib.js';
+import {
+  state, refreshUser, networkOf, orderBlockReason, netVars, loadCatalog, rememberShop, saveDraft, clearDraft, draftMatches, forgetRecentNumbers,
+  phoneHistory, phonebookList,
+} from './state.js';
+import { netTag, alertBox, shortDate, nudge, busyGuard } from './ui.js';
 import { icon } from './icons.js';
 
 /** เวลารอคำตอบตอนสั่งรายการ — เกินนี้ถือว่า "ไม่รู้ผล" ให้กดส่งซ้ำด้วยคีย์เดิมได้ */
@@ -82,9 +85,24 @@ export function orderErrorHtml(err) {
   }
 }
 
+/** ชื่อในสมุด / เบอร์ใหม่ / เครือข่ายที่เคยเติมสำเร็จ — แสดงใต้เบอร์ในหน้าต่างยืนยัน */
+function phoneInfoHtml(phone, hist, book) {
+  const name = book?.find((e) => e.phone === phone)?.name || null;
+  const parts = [];
+  if (name) parts.push(html`<span class="badge primary plain">${icon('book', 13)} ${name}</span>`);
+  if (hist === null) parts.push(html`<span class="badge warning">เบอร์ใหม่ ยังไม่เคยเติม</span>`);
+  else if (hist && !hist.confirmed) parts.push(html`<span class="badge warning">ยังไม่เคยเติมสำเร็จ</span>`);
+  else if (hist?.confirmed) {
+    parts.push(html`<span class="badge success plain">${icon('check', 13)} เติม ${networkOf(hist.network)?.name || hist.network} สำเร็จล่าสุด ${shortDate(hist.at)}</span>`);
+  }
+  return parts;
+}
+
 /**
  * เปิดหน้าต่างยืนยัน แล้วส่งรายการ
  * @param {{type:'topup'|'package', network:string, phone:string, amount?:number, productId?:number}} input
+ * @param {{returnPath?:string, form?:HTMLFormElement, onFieldError?:Function, onOpen?:Function}} [opts]
+ *   onOpen = เรียกเมื่อได้ราคาแล้วและกำลังเปิดหน้าต่างยืนยัน (หน้าเดิมใช้หยุดแสดง "กำลังตรวจสอบ...")
  * @returns {Promise<object|null>} order ที่สร้าง หรือ null ถ้ายกเลิก
  */
 export async function confirmAndOrder(input, opts = {}) {
@@ -97,7 +115,7 @@ export async function confirmAndOrder(input, opts = {}) {
   }
 }
 
-async function confirmFlow(input, { returnPath, form, onFieldError } = {}) {
+async function confirmFlow(input, { returnPath, form, onFieldError, onOpen } = {}) {
   if (!state.user) {
     loginRedirect(returnPath || location.hash.slice(1) || '/');
     return null;
@@ -108,6 +126,8 @@ async function confirmFlow(input, { returnPath, form, onFieldError } = {}) {
     return null;
   }
 
+  // ข้อมูลประกอบของเบอร์ (ชื่อในสมุด / เคยเติมสำเร็จไหม) — โหลดคู่กับราคา ไม่ทำให้หน้าต่างเปิดช้าลง
+  const infoP = Promise.all([phoneHistory(input.phone).catch(() => undefined), phonebookList().catch(() => null)]);
   let quote;
   try {
     quote = await api.post('/api/orders/quote', input, { timeout: ORDER_TIMEOUT_MS });
@@ -118,6 +138,7 @@ async function confirmFlow(input, { returnPath, form, onFieldError } = {}) {
     toast(err.message, 'error', 5200);
     return null;
   }
+  if (state.user?.id === undefined) return null; // ออกจากระบบระหว่างรอ
 
   const net = networkOf(quote.network);
   const isTopup = input.type === 'topup';
@@ -134,22 +155,27 @@ async function confirmFlow(input, { returnPath, form, onFieldError } = {}) {
   const finish = (r) => {
     refreshUser();
     if (input.shop) rememberShop(input.shop); // ครั้งหน้าเลือกร้านนี้ไว้ให้ก่อน
+    // ทำรายการที่ค้างไว้แล้ว → ไม่ต้องเตือนอีก (สั่งรายการอื่นอยู่ → ยังเก็บรายการที่ค้างไว้)
+    if (draftMatches(r.order?.type || input.type, r.order?.phone || input.phone)) clearDraft();
+    forgetRecentNumbers();
     if (r.existing) toast('รายการนี้ถูกส่งไปแล้ว — ระบบไม่ตัดเงินซ้ำ', 'warning', 5000);
     else toast(isTopup ? 'ส่งรายการเติมเงินแล้ว' : 'ส่งรายการสมัครแพ็กเกจแล้ว', 'success');
     navigate(`/order/${r.order.ref}`);
     return r.order;
   };
 
+  onOpen?.();
   const result = await modal({
     title: isTopup ? 'ยืนยันการเติมเงิน' : 'ยืนยันการสมัครแพ็กเกจ',
     body: html`
-      <div class="confirm-box" style="--net:${raw(safeColor(net?.color))}">
-        <div class="row between">
+      <div class="confirm-box" style="${netVars(net?.color)}">
+        <div class="row between wrap" style="--gap:8px">
           <div class="row" style="--gap:8px">${netTag(quote.network)}<span class="bold">${net?.full_name || quote.network_name}</span></div>
           <span class="badge primary plain">${isTopup ? 'เติมเงิน' : 'แพ็กเกจ'}</span>
         </div>
         <div class="confirm-label">เบอร์ปลายทาง</div>
         <div class="confirm-phone">${phoneFmt(quote.phone)}</div>
+        <div class="confirm-info" data-phone-info aria-live="polite"></div>
         <div class="confirm-product">${quote.product_name}</div>
         <div class="sum-lines">
           ${quote.shop_name ? html`<div class="sum-line"><span class="muted">ร้าน</span><span class="bold">${quote.shop_name}</span></div>` : ''}
@@ -160,18 +186,24 @@ async function confirmFlow(input, { returnPath, form, onFieldError } = {}) {
             <span class="num">฿${baht(quote.balance)} → ${quote.enough_balance ? html`฿${baht(after)}` : html`<span class="text-danger bold">ไม่พอ</span>`}</span></div>
         </div>
       </div>
-      ${quote.enough_balance ? '' : html`<div class="mt-2">${orderErrorHtml({ code: 'INSUFFICIENT_BALANCE', details: { need: quote.price, have: quote.balance } })}</div>`}
+      ${quote.enough_balance ? '' : html`<div class="mt-2" data-balance-alert>${orderErrorHtml({ code: 'INSUFFICIENT_BALANCE', details: { need: quote.price, have: quote.balance } })}</div>`}
+      <div data-net-warn></div>
       <div data-dup></div>
-      <label class="check confirm-check">
+      <label class="check confirm-check" data-ok-label>
         <input type="checkbox" data-ok-check>
         <span>ตรวจสอบเบอร์ <b class="num">${phoneFmt(quote.phone)}</b> และเครือข่าย <b>${net?.name || quote.network_name}</b> ถูกต้องแล้ว</span>
       </label>
+      <div class="xsmall text-danger mt-1" data-ok-hint role="alert"></div>
       <p class="xsmall muted mt-1 mb-0 row" style="--gap:6px">${icon('shield', 14)} เติมผิดเบอร์ยกเลิกไม่ได้ · ถ้าไม่สำเร็จ ระบบคืนเงินเข้ากระเป๋าอัตโนมัติ</p>
       ${quote.shop_name ? html`<p class="xsmall muted mt-1 mb-0">ถ้า${quote.shop_name}ไม่รับรายการ ระบบอาจส่งต่อให้ร้านอื่นอัตโนมัติ ในราคาเดิม</p>` : ''}
       <div data-err></div>`,
     foot: html`<button class="btn" data-close>ยกเลิก</button>
-      <button class="btn primary" data-submit disabled>${icon('check', 18)} ยืนยันชำระ ฿${baht(quote.price)}</button>`,
+      <button class="btn primary soft-disabled" data-submit aria-disabled="true">${icon('check', 18)} ยืนยันชำระ ฿${baht(quote.price)}</button>`,
     onMount: (dlg, close) => {
+      // เงินไม่พอ → ไปเติมเงินเข้ากระเป๋า: จำรายการนี้ไว้ เติมเงินเสร็จกลับมาทำต่อได้ทันที (ไม่ต้องกรอกใหม่)
+      dlg.addEventListener('click', (e) => {
+        if (e.target.closest('a[href^="#/wallet"]') && returnPath) saveDraft(returnPath, `${quote.product_name} → ${phoneFmt(quote.phone)}`);
+      });
       // ระหว่างส่ง ห้ามปิดหน้าต่าง (กันผู้ใช้เข้าใจผิดว่ายกเลิกแล้ว)
       dlg.addEventListener('click', (e) => {
         if (busy && (e.target === dlg || e.target.closest('[data-close]'))) {
@@ -183,11 +215,31 @@ async function confirmFlow(input, { returnPath, form, onFieldError } = {}) {
 
       const btn = dlg.querySelector('[data-submit]');
       const okCheck = dlg.querySelector('[data-ok-check]');
+      const okLabel = dlg.querySelector('[data-ok-label]');
+      const okHint = dlg.querySelector('[data-ok-hint]');
       const dupBox = dlg.querySelector('[data-dup]');
       const errBox = dlg.querySelector('[data-err]');
       const dupChecked = () => Boolean(dlg.querySelector('[data-dup-check]')?.checked);
+      const canSubmit = () => okCheck.checked && (!dupRequired || dupChecked()) && quote.enough_balance && !priceChanged;
+      // ปุ่มยังกดได้ (ไม่ disabled จริง) — กดก่อนพร้อม = ชี้ไปที่สิ่งที่ยังขาด แต่จะไม่ส่งรายการจนกว่าครบทุกข้อ
       const sync = () => {
-        btn.disabled = !(okCheck.checked && (!dupRequired || dupChecked()) && quote.enough_balance && !priceChanged);
+        const ok = canSubmit();
+        btn.classList.toggle('soft-disabled', !ok);
+        btn.setAttribute('aria-disabled', ok ? 'false' : 'true');
+        if (okCheck.checked) okHint.textContent = '';
+      };
+      const pointToMissing = () => {
+        if (priceChanged) { nudge(errBox); return; }
+        if (!quote.enough_balance) { nudge(dlg.querySelector('[data-balance-alert]') || errBox); return; }
+        if (!okCheck.checked) {
+          okHint.textContent = 'ติ๊กช่องนี้หลังตรวจเบอร์และเครือข่ายแล้ว จึงจะยืนยันได้';
+          nudge(okLabel, { focus: okCheck });
+          return;
+        }
+        if (dupRequired && !dupChecked()) {
+          const dupLabel = dlg.querySelector('[data-dup-check]')?.closest('label');
+          nudge(dupLabel || dupBox, { focus: dlg.querySelector('[data-dup-check]') });
+        }
       };
       const showDup = (message) => {
         dupRequired = true;
@@ -199,7 +251,22 @@ async function confirmFlow(input, { returnPath, form, onFieldError } = {}) {
       if (quote.warning) showDup(quote.warning.message);
       okCheck.addEventListener('change', sync);
 
+      // ชื่อในสมุด / เบอร์ใหม่ / เครือข่ายที่เคยเติมสำเร็จ (ไม่ตรงกับรายการนี้ → เตือนชัดๆ)
+      const infoEl = dlg.querySelector('[data-phone-info]');
+      const netWarn = dlg.querySelector('[data-net-warn]');
+      infoP.then(([hist, book]) => {
+        if (!dlg.isConnected) return;
+        setHTML(infoEl, phoneInfoHtml(quote.phone, hist, book));
+        const hn = hist?.confirmed ? networkOf(hist.network) : null;
+        if (hn && hn.code !== quote.network) {
+          setHTML(netWarn, html`<div class="mt-2">${alertBox('warning', html`<b>ตรวจเครือข่ายอีกครั้ง:</b> เบอร์นี้เติม ${hn.name} สำเร็จล่าสุด ${shortDate(hist.at)} แต่รายการนี้เป็น ${net?.name || quote.network_name}
+            — ถ้าเลือกผิด กด "ยกเลิก" แล้วเปลี่ยนเครือข่าย`)}</div>`);
+        }
+      });
+
       btn.addEventListener('click', () => {
+        if (busy || btn.classList.contains('is-loading')) return;
+        if (!canSubmit()) { pointToMissing(); return; }
         withLoading(btn, async () => {
           setHTML(errBox, '');
           // บัญชีที่เข้าสู่ระบบเปลี่ยนไประหว่างเปิดหน้าต่าง (เช่น เข้าสู่ระบบบัญชีอื่นจากแท็บอื่น) → ห้ามส่งในบัญชีใหม่
@@ -208,6 +275,7 @@ async function confirmFlow(input, { returnPath, form, onFieldError } = {}) {
             return;
           }
           busy = true;
+          const release = busyGuard(); // กันปิด/รีเฟรชหน้าระหว่างรอผล
           pendingKeys.set(sig, key); // ยังไม่รู้ผลจนกว่าจะได้คำตอบ
           try {
             // expectedPrice = ราคาที่ลูกค้าเห็นในหน้าต่างนี้ — ราคาเปลี่ยนระหว่างนั้น ระบบจะไม่ตัดเงิน (PRICE_CHANGED)
@@ -215,11 +283,13 @@ async function confirmFlow(input, { returnPath, form, onFieldError } = {}) {
               ...input, idempotencyKey: key, confirmDuplicate: dupRequired && dupChecked(), expectedPrice: quote.price,
             }, { timeout: ORDER_TIMEOUT_MS });
             busy = false;
+            release();
             pendingKeys.delete(sig); // สร้างรายการแล้ว → ครั้งต่อไปเป็นรายการใหม่
             if (dlg.open) close(r);
             else finish(r);
           } catch (err) {
             busy = false;
+            release();
             if (err.code === 'IDEMPOTENCY_MISMATCH') pendingKeys.delete(sig);
             if (isShopError(err)) {
               // ร้าน/ยอด/แพ็กเกจนี้ไม่พร้อมแล้ว (ยังไม่ตัดเงิน) → โหลดข้อมูลร้านใหม่ ปิดหน้าต่างให้เลือกร้านหรือยอดใหม่
