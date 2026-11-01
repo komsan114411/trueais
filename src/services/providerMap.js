@@ -69,9 +69,14 @@ async function syncCatalog(name, actor, ip) {
     }
     for (const x of r.rows) {
       db.run(
-        `INSERT OR REPLACE INTO provider_catalog (provider, service_id, product_code, product_name, service_name, category, currency, price,
+        `INSERT INTO provider_catalog (provider, service_id, product_code, product_name, service_name, category, currency, price,
            input_field, input_pattern, phone_format, inputs_json, supported, unsupported_reason, synced_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (provider, service_id) DO UPDATE SET
+           product_code = excluded.product_code, product_name = excluded.product_name, service_name = excluded.service_name,
+           category = excluded.category, currency = excluded.currency, price = excluded.price, input_field = excluded.input_field,
+           input_pattern = excluded.input_pattern, phone_format = excluded.phone_format, inputs_json = excluded.inputs_json,
+           supported = excluded.supported, unsupported_reason = excluded.unsupported_reason, synced_at = excluded.synced_at`,
         name, x.serviceId, x.productCode, x.productName, x.serviceName, x.category, x.currency, x.price,
         x.inputField, x.inputPattern, x.phoneFormat, JSON.stringify(x.inputs || []).slice(0, 4000), x.supported ? 1 : 0, x.reason, now,
       );

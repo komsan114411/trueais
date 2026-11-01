@@ -141,6 +141,11 @@ function buildConfig(env = process.env) {
     warnings.push(`PUBLIC_URL=${show(publicUrl)} ต้องขึ้นต้นด้วย http:// หรือ https:// (เช่น https://www.ร้านของคุณ.com) — ไม่อย่างนั้นลิงก์ที่ระบบสร้างจะใช้ไม่ได้`);
   }
   const dataDir = path.resolve(ROOT, str(env.DATA_DIR, 'data'));
+  // ฐานข้อมูล: ตั้ง DATABASE_URL = PostgreSQL / เว้นว่าง = SQLite ไฟล์ในเครื่อง (data/topup.db)
+  const databaseUrl = str(env.DATABASE_URL).trim();
+  if (databaseUrl && !/^postgres(?:ql)?:\/\/\S+$/i.test(databaseUrl)) {
+    errors.push(new ConfigError('DATABASE_URL', 'ต้องขึ้นต้นด้วย postgres:// หรือ postgresql:// (เว้นว่าง = ใช้ SQLite ไฟล์ในเครื่อง)'));
+  }
 
   return {
     root: ROOT,
@@ -151,6 +156,7 @@ function buildConfig(env = process.env) {
     trustProxy: str(env.TRUST_PROXY),
     dataDir,
     dbFile: path.join(dataDir, str(env.DB_FILE, 'topup.db')),
+    databaseUrl,
     uploadDir: path.join(dataDir, 'uploads'),
     isProd: env.NODE_ENV === 'production',
     // DEBUG=1 → แสดงรายละเอียดทางเทคนิค (stack) เมื่อเปิดระบบไม่สำเร็จ

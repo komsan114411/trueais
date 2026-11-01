@@ -414,11 +414,22 @@ test('สำรองฐานข้อมูล: ได้ไฟล์ที่
   assert.equal(r.status, 201, JSON.stringify(r.body));
   const list = await admin.get('/api/admin/backups');
   assert.ok(list.body.data.some((b) => b.name === r.body.data.name));
-  const { DatabaseSync } = require('node:sqlite');
   const path = require('node:path');
-  const copy = new DatabaseSync(path.join(process.env.DATA_DIR, 'backups', r.body.data.name), { readOnly: true });
-  assert.ok(copy.prepare('SELECT COUNT(*) AS c FROM users').get().c > 1);
-  copy.close();
+  const file = path.join(process.env.DATA_DIR, 'backups', r.body.data.name);
+  if (db.isPostgres()) {
+    // PostgreSQL: ไฟล์ .json.gz — บรรทัดแรกเป็นหัวไฟล์ บรรทัดสุดท้ายบอกจำนวนแถวของทุกตาราง
+    assert.match(r.body.data.name, /\.json\.gz$/);
+    const lines = require('node:zlib').gunzipSync(require('node:fs').readFileSync(file)).toString('utf8').trim().split('\n');
+    assert.equal(JSON.parse(lines[0]).format, 'topup-backup');
+    const end = JSON.parse(lines.at(-1));
+    assert.equal(end.end, true);
+    assert.ok(end.counts.users > 1);
+  } else {
+    const { DatabaseSync } = require('node:sqlite');
+    const copy = new DatabaseSync(file, { readOnly: true });
+    assert.ok(copy.prepare('SELECT COUNT(*) AS c FROM users').get().c > 1);
+    copy.close();
+  }
 });
 
 test('ตรวจบัญชี: ยอดในกระเป๋าทุกคนตรงกับสมุดบัญชี', () => {

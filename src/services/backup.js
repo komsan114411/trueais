@@ -1,6 +1,11 @@
 'use strict';
-// สำรองฐานข้อมูลอัตโนมัติวันละครั้ง (เก็บ 14 ชุดล่าสุด) + สำรองทันทีจากหน้าแอดมิน
-// ใช้ VACUUM INTO ซึ่งได้ไฟล์ที่สมบูรณ์แม้ระบบกำลังทำงานอยู่
+/**
+ * สำรองฐานข้อมูลอัตโนมัติวันละครั้ง + สำรองทันทีจากหน้าแอดมิน
+ *   SQLite     → ไฟล์ .db ทั้งก้อน (VACUUM INTO — สมบูรณ์แม้ระบบกำลังทำงาน) ใช้แทนไฟล์เดิมได้ทันที
+ *   PostgreSQL → ไฟล์ .json.gz ทุกตารางจาก snapshot เดียวกัน (ระบบทำงานต่อได้ระหว่างสำรอง)
+ *                กู้คืน: npm run admin -- restore <ไฟล์>
+ * เก็บสำเนาล่าสุดของแต่ละวัน 14 วัน + สำเนาล่าสุด 10 ชุด (รวมที่กดสำรองเอง)
+ */
 const fs = require('node:fs');
 const path = require('node:path');
 const config = require('../config');
@@ -8,9 +13,9 @@ const db = require('../db');
 const logger = require('../lib/logger');
 const { bangkokDate } = require('../lib/time');
 
-const KEEP_DAYS = 14; // เก็บสำเนาล่าสุดของแต่ละวัน 14 วัน
-const KEEP_RECENT = 10; // + สำเนาล่าสุด 10 ชุด (รวมที่กดสำรองเอง)
-const NAME_RE = /^topup-\d{4}-\d{2}-\d{2}-\d{4}\.db$/;
+const KEEP_DAYS = 14;
+const KEEP_RECENT = 10;
+const NAME_RE = /^topup-\d{4}-\d{2}-\d{2}-\d{4}\.(?:db|json\.gz)$/;
 const dir = () => path.join(config.dataDir, 'backups');
 
 function list() {
@@ -25,16 +30,28 @@ function list() {
     });
 }
 
+let inFlight = null;
+
+/** สำรองทันที — กดซ้ำระหว่างกำลังสำรองจะได้ผลของรอบเดียวกัน (ไม่สำรองซ้อน) */
 function backupNow() {
-  fs.mkdirSync(dir(), { recursive: true });
-  const bkk = new Date(Date.now() + 7 * 3600000).toISOString();
-  const name = `topup-${bkk.slice(0, 10)}-${bkk.slice(11, 13)}${bkk.slice(14, 16)}.db`;
-  const file = path.join(dir(), name);
-  fs.rmSync(file, { force: true });
-  db.raw().exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
-  prune();
-  logger.info(`สำรองฐานข้อมูลแล้ว: ${name}`);
-  return { name, size: fs.statSync(file).size };
+  if (!inFlight) {
+    inFlight = (async () => {
+      fs.mkdirSync(dir(), { recursive: true });
+      const bkk = new Date(Date.now() + 7 * 3600000).toISOString();
+      const ext = db.isPostgres() ? 'json.gz' : 'db';
+      const name = `topup-${bkk.slice(0, 10)}-${bkk.slice(11, 13)}${bkk.slice(14, 16)}.${ext}`;
+      const file = path.join(dir(), name);
+      fs.rmSync(file, { force: true });
+      await db.backupTo(file);
+      prune();
+      const size = fs.statSync(file).size;
+      logger.info(`สำรองฐานข้อมูลแล้ว: ${name}`);
+      return { name, size };
+    })().finally(() => {
+      inFlight = null;
+    });
+  }
+  return inFlight;
 }
 
 function prune() {
@@ -59,7 +76,7 @@ function filePath(name) {
   return fs.existsSync(file) ? file : null;
 }
 
-function dailyBackup() {
+async function dailyBackup() {
   const today = `topup-${bangkokDate()}-`;
   if (list().some((b) => b.name.startsWith(today))) return null;
   return backupNow();

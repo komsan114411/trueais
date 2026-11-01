@@ -1,9 +1,28 @@
-# ใช้งาน: docker compose up -d   (ข้อมูลทั้งหมดเก็บใน ./data)
+# ใช้งาน: docker compose up -d   (ฐานข้อมูล PostgreSQL อยู่ใน volume "pgdata" / สลิปและไฟล์สำรองอยู่ใน ./data)
 #
+# ก่อนเปิดครั้งแรก: ตั้ง POSTGRES_PASSWORD ใน .env เป็นตัวอักษรภาษาอังกฤษ/ตัวเลขยาวๆ (ห้ามมีสัญลักษณ์)
 # พอร์ตเปิดเฉพาะในเครื่อง (127.0.0.1) — ให้ Nginx/Caddy บนเครื่องเป็นตัวรับจากอินเทอร์เน็ตพร้อม HTTPS
 # แล้วตั้ง .env: TRUST_PROXY=loopback,uniquelocal  และ PUBLIC_URL=https://โดเมนของคุณ
 # (ถ้าจำเป็นต้องเปิดพอร์ตตรงโดยไม่มี proxy ให้ลบ "127.0.0.1:" ออก และเว้น TRUST_PROXY ว่าง)
+# เคยใช้ SQLite (data/topup.db) มาก่อน → ย้ายข้อมูล:
+#   docker compose exec topup node --disable-warning=ExperimentalWarning scripts/admin.js import-sqlite --yes
 services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: topup
+      POSTGRES_USER: topup
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?ตั้ง POSTGRES_PASSWORD ใน .env ก่อน}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U topup -d topup"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    stop_grace_period: 30s
+
   topup:
     build: .
     restart: unless-stopped
@@ -11,8 +30,15 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=3000
+      - DATABASE_URL=postgres://topup:${POSTGRES_PASSWORD}@db:5432/topup
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
       - ./data:/app/data
     stop_grace_period: 40s
+
+volumes:
+  pgdata:

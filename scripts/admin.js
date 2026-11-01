@@ -9,6 +9,8 @@
  *   npm run admin -- backup             (สำรองฐานข้อมูลทันที → data/backups)
  *   npm run admin -- notify-test        (ทดสอบส่งแจ้งเตือน LINE / Telegram ตามค่าใน .env — เหมือนปุ่มในหน้าตั้งค่า)
  *   npm run admin -- reconcile          (ตรวจยอดกระเป๋าเงินทุกบัญชีเทียบกับสมุดบัญชี)
+ *   npm run admin -- restore <ไฟล์.json.gz> --yes      (PostgreSQL: กู้คืนจากไฟล์สำรอง — แทนที่ข้อมูลทั้งหมด)
+ *   npm run admin -- import-sqlite [<ไฟล์.db>] --yes  (PostgreSQL: ย้ายข้อมูลจาก SQLite เดิม ค่าเริ่มต้น data/topup.db)
  * --user ใส่อีเมลหรือเบอร์โทรก็ได้ (--email / --phone ใช้ได้เหมือนเดิม)
  * ไม่ใส่ --password → อ่านจากตัวแปร TOPUP_NEW_PASSWORD (ไฟล์ reset-admin-password.bat ส่งมาทางนี้ กันปัญหาอักขระพิเศษ)
  * ทุกการแก้บัญชีถูกบันทึกในหน้าแอดมิน → Log → การกระทำของแอดมิน (ผู้ทำ = ระบบ, via: cli)
@@ -107,8 +109,8 @@ function disable2fa() {
   if (u.status !== 'active') console.log(suspendedNote(u));
 }
 
-function backup() {
-  const r = require('../src/services/backup').backupNow();
+async function backup() {
+  const r = await require('../src/services/backup').backupNow();
   audit(null, 'system.backup', 'backup', r.name, { ...CLI, size: r.size });
   const dir = path.join(config.dataDir, 'backups');
   const size = r.size >= 1048576 ? `${(r.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(r.size / 1024))} KB`;
@@ -157,8 +159,59 @@ function reconcile() {
   if (bad.length || orders.length) process.exitCode = 2;
 }
 
+const positional = (i) => {
+  const v = process.argv[i];
+  return v && !v.startsWith('--') ? v : null;
+};
+const transfer = () => require('../src/database/transfer');
+
+function restore() {
+  const input = positional(3);
+  if (!input) throw new Error('ระบุไฟล์สำรอง เช่น npm run admin -- restore data/backups/topup-2026-11-02-0300.json.gz --yes');
+  const file = path.resolve(input);
+  if (!db.isPostgres()) {
+    console.log('ระบบนี้ใช้ SQLite (ไม่ได้ตั้ง DATABASE_URL) — กู้คืนด้วยการคัดลอกไฟล์:');
+    console.log(`  1) ปิดระบบ  2) คัดลอก ${file} ไปทับ ${config.dbFile}  3) ลบไฟล์ ${config.dbFile}-wal และ -shm ถ้ามี  4) เปิดระบบ`);
+    process.exitCode = 1;
+    return;
+  }
+  const b = transfer().readBackup(file); // ตรวจไฟล์ก่อนถามยืนยัน
+  if (!hasFlag('yes')) {
+    console.log(`ไฟล์สำรองเมื่อ ${b.header.created_at}: ผู้ใช้ ${b.counts.users || 0} บัญชี, รายการ ${b.counts.orders || 0} รายการ`);
+    console.log(`ข้อมูลทั้งหมดในฐานข้อมูลตอนนี้จะถูกแทนที่ (ตอนนี้มี: ${JSON.stringify(transfer().usage())})`);
+    console.log('ปิดระบบก่อน แล้วสั่งคำสั่งเดิมโดยเพิ่ม --yes ต่อท้ายเพื่อยืนยัน');
+    process.exitCode = 1;
+    return;
+  }
+  const r = transfer().restoreBackup(file);
+  audit(null, 'system.restore', 'backup', path.basename(file), { ...CLI, created_at: r.created_at });
+  console.log(`✓ กู้คืนข้อมูลจากไฟล์สำรอง (สร้างเมื่อ ${r.created_at}) แล้ว — เปิดระบบได้เลย`);
+  console.table(r.counts);
+}
+
+function importSqlite() {
+  const file = path.resolve(positional(3) || config.dbFile);
+  if (!db.isPostgres()) throw new Error('ตั้ง DATABASE_URL ของ PostgreSQL ปลายทางก่อน (คำสั่งนี้ย้ายข้อมูลจาก SQLite → PostgreSQL)');
+  const t = transfer();
+  if (t.hasUsage() && !hasFlag('replace')) {
+    throw new Error(`PostgreSQL ปลายทางมีข้อมูลใช้งานแล้ว (${JSON.stringify(t.usage())}) — ถ้าต้องการแทนที่ทั้งหมดให้เพิ่ม --replace`);
+  }
+  if (!hasFlag('yes')) {
+    console.log(`จะคัดลอกข้อมูลทั้งหมดจาก ${file} → PostgreSQL (ข้อมูลตั้งต้นใน PostgreSQL ถูกแทนที่) — ไฟล์ต้นฉบับไม่ถูกแก้`);
+    console.log('สั่งคำสั่งเดิมโดยเพิ่ม --yes ต่อท้ายเพื่อยืนยัน');
+    process.exitCode = 1;
+    return;
+  }
+  const counts = t.importSqlite(file);
+  audit(null, 'system.import_sqlite', 'database', path.basename(file), { ...CLI, users: counts.users, orders: counts.orders });
+  console.log('✓ ย้ายข้อมูลเข้า PostgreSQL แล้ว');
+  console.table(counts);
+  console.log(`  ไฟล์สลิปอยู่ที่ ${config.uploadDir} — คัดลอกโฟลเดอร์นี้ไปที่เครื่อง/โฟลเดอร์ data ของระบบใหม่ด้วย`);
+}
+
 const COMMANDS = {
   list, create, 'reset-password': resetPassword, unlock, 'disable-2fa': disable2fa, backup, 'notify-test': notifyTest, reconcile,
+  restore, 'import-sqlite': importSqlite,
 };
 
 const HELP = `คำสั่งที่ใช้ได้ (--user ใส่อีเมลหรือเบอร์โทรก็ได้):
@@ -169,7 +222,9 @@ const HELP = `คำสั่งที่ใช้ได้ (--user ใส่อ
   npm run admin -- disable-2fa --user <อีเมล/เบอร์>
   npm run admin -- backup
   npm run admin -- notify-test
-  npm run admin -- reconcile`;
+  npm run admin -- reconcile
+  npm run admin -- restore <ไฟล์สำรอง.json.gz> --yes       (PostgreSQL)
+  npm run admin -- import-sqlite [<ไฟล์.db>] --yes [--replace] (ย้าย SQLite → PostgreSQL)`;
 
 async function main() {
   const cmd = process.argv[2];

@@ -292,8 +292,8 @@ router.get('/backups/:name/download', (req, res) => {
   settings.setInternal('_last_backup_download', db.nowIso());
   res.download(file, req.params.name);
 });
-router.post('/backups', (req, res) => {
-  const r = backup.backupNow();
+router.post('/backups', async (req, res) => {
+  const r = await backup.backupNow();
   audit.log(req.user.id, 'system.backup', 'backup', r.name, { size: r.size }, req.ip);
   ok(res, r, 201);
 });

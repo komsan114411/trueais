@@ -6,9 +6,9 @@ const { bangkokDayStart, bangkokMonthStart, bangkokDateRange, bangkokDate } = re
 const providerStatus = require('./providerStatus');
 
 const SUM_COLS = `COUNT(*) AS orders,
-  COALESCE(SUM(o.status = 'success'), 0) AS success,
-  COALESCE(SUM(o.status IN ('failed','refunded')), 0) AS failed,
-  COALESCE(SUM(o.status IN ('pending','processing')), 0) AS processing,
+  COALESCE(SUM(CASE WHEN o.status = 'success' THEN 1 ELSE 0 END), 0) AS success,
+  COALESCE(SUM(CASE WHEN o.status IN ('failed','refunded') THEN 1 ELSE 0 END), 0) AS failed,
+  COALESCE(SUM(CASE WHEN o.status IN ('pending','processing') THEN 1 ELSE 0 END), 0) AS processing,
   COALESCE(SUM(CASE WHEN o.status = 'success' THEN o.price END), 0) AS revenue,
   COALESCE(SUM(CASE WHEN o.status = 'success' THEN o.cost END), 0) AS cost,
   COALESCE(SUM(CASE WHEN o.status = 'success' THEN o.price - o.cost END), 0) AS profit`;
@@ -18,7 +18,7 @@ const summary = (since) => db.get(`SELECT ${SUM_COLS} FROM orders o WHERE o.crea
 function dashboard() {
   const days = 14;
   const since = new Date(Date.parse(bangkokDayStart()) - (days - 1) * 86400000).toISOString();
-  const rows = db.all(`SELECT date(o.created_at, '+7 hours') AS day, ${SUM_COLS} FROM orders o WHERE o.created_at >= ? GROUP BY day ORDER BY day`, since);
+  const rows = db.all(`SELECT ${db.sql.bkkDay('o.created_at')} AS day, ${SUM_COLS} FROM orders o WHERE o.created_at >= ? GROUP BY day ORDER BY day`, since);
   const byDay = new Map(rows.map((r) => [r.day, r]));
   const series = [];
   for (let i = 0; i < days; i++) {
@@ -45,8 +45,9 @@ function dashboard() {
 }
 
 const GROUPS = {
-  day: { key: "date(o.created_at, '+7 hours')", label: "date(o.created_at, '+7 hours')", order: 'k DESC' },
-  month: { key: "strftime('%Y-%m', o.created_at, '+7 hours')", label: "strftime('%Y-%m', o.created_at, '+7 hours')", order: 'k DESC' },
+  // วัน/เดือนตามเวลาไทย — SQL ต่างกันระหว่าง SQLite กับ PostgreSQL จึงสร้างตอนเรียกใช้
+  day: { key: () => db.sql.bkkDay('o.created_at'), label: () => db.sql.bkkDay('o.created_at'), order: 'k DESC' },
+  month: { key: () => db.sql.bkkMonth('o.created_at'), label: () => db.sql.bkkMonth('o.created_at'), order: 'k DESC' },
   network: { key: 'o.network_code', label: 'o.network_code', order: 'revenue DESC' },
   type: { key: 'o.type', label: "CASE o.type WHEN 'topup' THEN 'เติมเงิน' ELSE 'แพ็กเกจ' END", order: 'revenue DESC' },
   product: { key: 'o.product_name', label: 'o.product_name', order: 'revenue DESC' },
@@ -55,6 +56,7 @@ const GROUPS = {
 };
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const sqlOf = (v) => (typeof v === 'function' ? v() : v);
 
 function sales({ from, to, group = 'day' } = {}) {
   const g = Object.hasOwn(GROUPS, String(group)) ? GROUPS[group] : null;
@@ -67,10 +69,10 @@ function sales({ from, to, group = 'day' } = {}) {
   if (from > to) throw E.validation('วันที่เริ่มต้องไม่หลังวันที่สิ้นสุด');
   const range = bangkokDateRange(from, to);
   const rows = db.all(
-    `SELECT ${g.key} AS k, ${g.label} AS label, ${SUM_COLS}
+    `SELECT ${sqlOf(g.key)} AS k, ${sqlOf(g.label)} AS label, ${SUM_COLS}
      FROM orders o JOIN users u ON u.id = o.user_id
      WHERE o.created_at >= ? AND o.created_at < ?
-     GROUP BY k ORDER BY ${g.order} LIMIT 1000`,
+     GROUP BY k, label ORDER BY ${g.order} LIMIT 1000`,
     range.start, range.end,
   );
   const total = db.get(`SELECT ${SUM_COLS} FROM orders o WHERE o.created_at >= ? AND o.created_at < ?`, range.start, range.end);

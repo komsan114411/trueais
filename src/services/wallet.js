@@ -156,9 +156,9 @@ function reconcileOrders(limit = 200) {
     `SELECT o.id, o.ref, o.status, o.price, o.user_id, u.name AS user_name, COALESCE(SUM(l.amount), 0) AS net
      FROM orders o JOIN users u ON u.id = o.user_id
      LEFT JOIN wallet_ledger l ON l.ref_type = 'order' AND l.ref_id = o.id
-     GROUP BY o.id
-     HAVING (o.status IN ('pending','processing','success') AND net != -o.price)
-         OR (o.status IN ('failed','refunded') AND net != 0)
+     GROUP BY o.id, u.name
+     HAVING (o.status IN ('pending','processing','success') AND COALESCE(SUM(l.amount), 0) != -o.price)
+         OR (o.status IN ('failed','refunded') AND COALESCE(SUM(l.amount), 0) != 0)
      ORDER BY o.id DESC LIMIT ?`,
     limit,
   );

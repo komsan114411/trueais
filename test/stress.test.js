@@ -82,11 +82,12 @@ test('ยิงพร้อมกัน 100 รายการ (5 คน × 20) 
     assert.equal(bal, CREDIT - spent, `ยอดของ ${c.user.name} ไม่ตรง`);
   }
   // 3) รายการล้มเหลวคืนเงินครั้งเดียวพอดี / รายการสำเร็จไม่มีการคืนเงิน
-  const bad = db.all(`SELECT o.ref, o.status, (SELECT COUNT(*) FROM wallet_ledger l WHERE l.type = 'refund' AND l.ref_id = o.id) AS refunds
-                      FROM orders o WHERE (o.status = 'failed' AND refunds != 1) OR (o.status = 'success' AND refunds != 0)`);
+  const bad = db.all(`SELECT ref, status, refunds FROM (
+                        SELECT o.ref, o.status, (SELECT COUNT(*) FROM wallet_ledger l WHERE l.type = 'refund' AND l.ref_id = o.id) AS refunds FROM orders o
+                      ) x WHERE (status = 'failed' AND refunds != 1) OR (status = 'success' AND refunds != 0)`);
   assert.deepEqual(bad, []);
   // 4) ไม่มีรายการไหนถูกส่งไปผู้ให้บริการเกิน 1 ครั้ง
-  const multi = db.all("SELECT order_ref, COUNT(*) AS c FROM provider_logs WHERE action = 'submit' GROUP BY order_ref HAVING c > 1");
+  const multi = db.all("SELECT order_ref, COUNT(*) AS c FROM provider_logs WHERE action = 'submit' GROUP BY order_ref HAVING COUNT(*) > 1");
   assert.deepEqual(multi, []);
   // 5) timeout (…1111) ต้องไม่ถูกคืนเงิน เพราะฝั่งผู้ให้บริการเติมสำเร็จจริง
   const timeoutRefunded = db.get("SELECT COUNT(*) AS c FROM orders WHERE phone LIKE '%1111' AND status != 'success'").c;

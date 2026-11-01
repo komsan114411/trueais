@@ -178,7 +178,7 @@ function getSession(token, { background = false } = {}) {
 
 const destroySession = (token) => token && db.run('DELETE FROM sessions WHERE id = ?', sha256(token));
 const destroyUserSessions = (userId, exceptSessionId = null) =>
-  db.run('DELETE FROM sessions WHERE user_id = ? AND id IS NOT ?', userId, exceptSessionId);
+  db.run('DELETE FROM sessions WHERE user_id = ? AND id IS DISTINCT FROM ?', userId, exceptSessionId);
 
 // ───────────── เข้าสู่ระบบ ─────────────
 
@@ -493,7 +493,7 @@ function detail(id) {
   const stats = db.get(
     `SELECT COUNT(*) AS orders, COALESCE(SUM(CASE WHEN status = 'success' THEN price END), 0) AS spent,
             COALESCE(SUM(CASE WHEN status = 'success' THEN price - cost END), 0) AS profit,
-            SUM(status = 'success') AS success, SUM(status IN ('failed','refunded')) AS failed
+            COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) AS success, COALESCE(SUM(CASE WHEN status IN ('failed','refunded') THEN 1 ELSE 0 END), 0) AS failed
      FROM orders WHERE user_id = ?`,
     u.id,
   );

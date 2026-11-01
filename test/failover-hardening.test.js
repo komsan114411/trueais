@@ -219,7 +219,7 @@ test('#13 ผลขัดแย้ง: ระหว่างรอคำตอ�
   const r = await c.post('/api/orders', { type: 'topup', network: 'AIS', phone: phone('2003'), amount: 50, idempotencyKey: key() });
   assert.equal(r.status, 201);
   const ref = r.body.data.order.ref;
-  for (let i = 0; i < 100 && fake.createCount(ref) === 0; i++) await new Promise((x) => setTimeout(x, 10));
+  for (let i = 0; i < 400 && fake.createCount(ref) === 0; i++) await new Promise((x) => setTimeout(x, 10));
   assert.equal(await signedCallback(ref, 'PENDING'), 200); // มาถึงก่อนคำตอบของคำขอส่ง
   await app.queue.idle();
   const o = orderRow(ref);

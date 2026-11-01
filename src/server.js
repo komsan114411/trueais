@@ -1,5 +1,6 @@
 'use strict';
 // จุดเริ่มต้นของระบบ: ตรวจค่าตั้ง → เปิดฐานข้อมูล → สร้างแอดมินคนแรก → เปิดเว็บเซิร์ฟเวอร์ → เริ่มงานเบื้องหลัง
+const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 const config = require('./config');
@@ -11,7 +12,34 @@ const { ConfigError } = config;
 
 // ───────────── แปลงข้อผิดพลาดตอนเปิดระบบ → บอกเจ้าของร้านว่าต้องแก้ค่าไหนใน .env ─────────────
 
+/** ชื่อเครื่องฐานข้อมูลจาก DATABASE_URL (ไม่แสดงรหัสผ่าน) */
+function dbHost() {
+  try {
+    const u = new URL(config.databaseUrl);
+    return `${u.hostname}${u.port ? `:${u.port}` : ''}${u.pathname && u.pathname !== '/' ? u.pathname : ''}`;
+  } catch {
+    return 'ตาม DATABASE_URL';
+  }
+}
+
+function pgOpenError(err) {
+  const code = String(err?.code || '');
+  const reason = err?.message || String(err);
+  let text;
+  if (code === '28P01' || code === '28000') text = `ชื่อผู้ใช้หรือรหัสผ่านใน DATABASE_URL ไม่ถูกต้อง (${dbHost()})`;
+  else if (code === '3D000') text = `ไม่มีฐานข้อมูลตามชื่อใน DATABASE_URL (${dbHost()}) — สร้างฐานข้อมูลก่อน หรือแก้ชื่อให้ถูก`;
+  else if (code === '42501') text = `ผู้ใช้ใน DATABASE_URL ไม่มีสิทธิ์สร้างตาราง (${reason})`;
+  else if (code === 'DB_SCHEMA_NEWER') text = reason;
+  else if (/ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EHOSTUNREACH|timeout|terminated|DB_WORKER_DEAD|DB_TIMEOUT/i.test(`${code} ${reason}`)) {
+    text = `เชื่อมต่อ PostgreSQL ที่ ${dbHost()} ไม่ได้ (${code || reason}) — ตรวจ DATABASE_URL และว่าฐานข้อมูลเปิดอยู่`;
+  } else if (/ssl|certificate|self.signed/i.test(reason)) {
+    text = `ตั้งค่า SSL ของ PostgreSQL ไม่ตรงกับเซิร์ฟเวอร์ (${reason}) — ลองเพิ่ม ?sslmode=no-verify หรือ ?sslmode=disable ท้าย DATABASE_URL ตามที่ผู้ให้บริการฐานข้อมูลกำหนด`;
+  } else text = `เปิดฐานข้อมูล PostgreSQL (${dbHost()}) ไม่ได้: ${reason}`;
+  return new ConfigError('DATABASE_URL', text, err);
+}
+
 function dbOpenError(err) {
+  if (config.databaseUrl) return pgOpenError(err);
   const reason = err?.message || String(err);
   if (/not a database|malformed|corrupt/i.test(reason)) {
     return new Error(`ไฟล์ฐานข้อมูล ${config.dbFile} เสียหาย (${reason}) — กู้คืนจากไฟล์สำรองในโฟลเดอร์ ${path.join(config.dataDir, 'backups')} ตามคู่มือ README หัวข้อ "สำรองข้อมูล / กู้คืน"`, { cause: err });
@@ -77,6 +105,16 @@ async function start({ port = config.port, host = config.host } = {}) {
   } catch (err) {
     throw dbOpenError(err);
   }
+  // เปลี่ยนมาใช้ PostgreSQL แต่ยังมีข้อมูลเดิมใน SQLite → เตือนให้ย้ายก่อนเริ่มใช้งาน (ไม่อย่างนั้นข้อมูลเดิมจะไม่อยู่ในระบบ)
+  if (db.isPostgres() && fs.existsSync(config.dbFile)) {
+    try {
+      if (!require('./database/transfer').hasUsage()) {
+        logger.warn(`พบฐานข้อมูล SQLite เดิมที่ ${config.dbFile} แต่ PostgreSQL ยังไม่มีข้อมูล — ย้ายข้อมูลเดิมด้วย: npm run admin -- import-sqlite --replace --yes`);
+      }
+    } catch {
+      /* แค่คำเตือน */
+    }
+  }
 
   const providers = require('./providers');
   const orders = require('./services/orders');
@@ -118,6 +156,7 @@ async function start({ port = config.port, host = config.host } = {}) {
   const localUrl = `http://localhost:${actualPort}`;
   logger.info('════════════════════════════════════════════════════');
   logger.info(` ระบบเติมเงินพร้อมใช้งาน`);
+  logger.info(`   ฐานข้อมูล     : ${db.isPostgres() ? `PostgreSQL (${dbHost()})` : `SQLite (${config.dbFile})`}`);
   logger.info(`   หน้าเว็บลูกค้า : ${config.publicUrl}/`);
   logger.info(`   หลังบ้านแอดมิน : ${config.publicUrl}/admin`);
   if (config.publicUrl !== localUrl) logger.info(`   เปิดจากเครื่องนี้ : ${localUrl}/`);
