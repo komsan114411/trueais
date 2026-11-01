@@ -37,7 +37,8 @@ function providerCard(p) {
     </div>
     <dl class="dl">
       <dt>ลำดับการเลือก</dt><dd>${p.enabled ? `ลำดับที่ ${p.priority + 1}` : html`<span class="muted">ไม่ถูกเลือก (ปิดใช้ชั่วคราวในการตั้งค่าด้านล่าง)</span>`}</dd>
-      <dt>รายการที่ขาย</dt><dd class="small">${mapped ? 'จับคู่บริการเอง (1 ยอด/แพ็กเกจ = 1 บริการราคาคงที่)' : 'ใช้ยอดเติม/แพ็กเกจหลักของระบบ'}</dd>
+      <dt>รายการที่ขาย</dt><dd class="small">${mapped ? 'จับคู่บริการเอง (1 ยอด/แพ็กเกจ = 1 บริการราคาคงที่)'
+        : p.capabilities?.packages === false ? 'เฉพาะเติมเงิน (ยอดตามช่วงที่ร้านนี้รับ · ต้นทุนตามเงินคืนที่ตั้งไว้)' : 'ใช้ยอดเติม/แพ็กเกจหลักของระบบ'}</dd>
       <dt>เครดิตคงเหลือ</dt><dd>${balanceHtml(p.balance)}</dd>
       ${p.mappings ? html`<dt>การจับคู่</dt><dd>เปิดใช้ ${p.mappings.enabled} / ${p.mappings.total} รายการ · <a href="#/providers?tab=map:${p.name}">จัดการการจับคู่</a></dd>` : ''}
       <dt>เชื่อมต่อล้มเหลวติดกัน</dt><dd>${br.consecutiveFailures || 0} ครั้ง${br.lastError ? html`<div class="small text-2">ล่าสุด: ${br.lastError}</div>` : ''}</dd>

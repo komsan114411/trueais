@@ -191,7 +191,8 @@ export default async function topupPage(ctx) {
           : n && !shopServes(s, nc.code) ? html`<span class="badge danger">ไม่มีบริการค่ายนี้</span>`
             : sn?.discount_bp > 0 ? html`<span class="badge success plain">ส่วนลด ${percent(sn.discount_bp)}</span>` : ''}</div>`);
     } else {
-      setHTML(shopsEl, html`<div class="net-grid">${list.map((s) => shopCardHtml(s, n))}</div>`);
+      // 2 ร้าน = 2 คอลัมน์เต็มแถว (ชื่อร้านไม่ถูกบีบจนขึ้นบรรทัดใหม่บนจอเล็ก) / 3 ร้านขึ้นไป = 3 คอลัมน์
+      setHTML(shopsEl, html`<div class="net-grid shop-grid" style="--cols:${Math.min(list.length, 3)}">${list.map((s) => shopCardHtml(s, n))}</div>`);
     }
     setHTML(shopNoticeEl, shopNotice ? html`<div class="mt-2">${alertBox('warning', shopNotice)}</div>` : '');
   }
@@ -211,7 +212,10 @@ export default async function topupPage(ctx) {
       : html`<div class="small muted" style="grid-column:1/-1">${empty}</div>`);
     const custom = Boolean(n) && !needShop && customOk();
     customWrap.classList.toggle('hidden', !custom);
-    amountHelp.textContent = custom ? `เติมได้ ${bahtShort(n.topup.min)} - ${bahtShort(n.topup.max)} บาท (จำนวนเต็ม)` : '';
+    const r = shopRange();
+    const lo = r ? Math.max(r.min * 100, n.topup.min) : n.topup.min;
+    const hi = r ? Math.min(r.max * 100, n.topup.max) : n.topup.max;
+    amountHelp.textContent = custom ? `เติมได้ ${bahtShort(lo)} - ${bahtShort(hi)} บาท (จำนวนเต็ม)${r ? ` ที่ ${currentShop()?.name || 'ร้านนี้'}` : ''}` : '';
     if (document.activeElement !== amountInput && !Number.isNaN(st.amount)) amountInput.value = st.amount ? String(st.amount) : '';
     const err = amountError();
     customWrap.classList.toggle('has-error', Boolean(err) && custom);
