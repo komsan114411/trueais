@@ -86,7 +86,10 @@ export default async function topupPage(ctx) {
   const fixedAmounts = () => (Array.isArray(sNet()?.amounts) ? sNet().amounts : null);
   const customOk = () => (sNet() ? Boolean(sNet().custom) : Boolean(currentNet()?.topup.allow_custom));
   const discountBp = () => (sNet() ? sNet().discount_bp || 0 : currentNet()?.topup.discount_bp || 0);
-  const amountChoices = () => fixedAmounts() || currentNet()?.topup.presets || [];
+  /** ช่วงยอดของร้านที่เลือก (บาท) — ร้านบางร้านรับยอดแคบกว่าเครือข่าย เช่น wePAY dtac ไม่เกิน 800 */
+  const shopRange = () => (sNet() && (sNet().min != null || sNet().max != null) ? { min: sNet().min ?? 0, max: sNet().max ?? Infinity } : null);
+  const inShopRange = (a) => { const r = shopRange(); return !r || (a >= r.min && a <= r.max); };
+  const amountChoices = () => fixedAmounts() || (currentNet()?.topup.presets || []).filter(inShopRange);
   /** ราคาที่จ่ายจริงที่ร้านนี้ (สตางค์) — สูตรเดียวกับเซิร์ฟเวอร์ */
   const payFor = (bahtAmount) => priceAfter(bahtAmount * 100, discountBp());
 
@@ -138,6 +141,7 @@ export default async function topupPage(ctx) {
       return null;
     }
     if (st.amount * 100 < n.topup.min || st.amount * 100 > n.topup.max) return `เติม ${n.name} ได้ตั้งแต่ ${bahtShort(n.topup.min)} ถึง ${bahtShort(n.topup.max)} บาท`;
+    if (!inShopRange(st.amount)) return `${currentShop()?.name || 'ร้านนี้'} รับยอดเติม ${n.name} ตั้งแต่ ${shopRange().min} ถึง ${shopRange().max} บาท`;
     if (!customOk() && !n.topup.presets.includes(st.amount)) return `${n.name} เติมได้เฉพาะ ${n.topup.presets.join(', ')} บาท`;
     return null;
   }

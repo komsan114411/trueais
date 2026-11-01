@@ -112,6 +112,12 @@ function checklist(admin) {
         add('setup', `provider_${name}_https`, 'info', `${p.label} ส่งผลกลับ (callback) ได้เฉพาะ URL สาธารณะ — ตั้ง PUBLIC_URL เป็น https:// ของเว็บจริง (ระหว่างนี้ระบบเช็กสถานะเองอัตโนมัติ)`, '#/providers');
       }
     }
+    if (st.ready && name === 'wepay') {
+      if (!config.publicUrl.startsWith('https://')) {
+        add('setup', 'provider_wepay_https', 'warn', 'wePAY แจ้งผลรายการกลับมาที่ PUBLIC_URL — ต้องเป็น https:// ที่เปิดจากอินเทอร์เน็ตได้ (ไม่อย่างนั้นรายการที่หมดเวลารอจะรู้ผลไม่ได้ ต้องตรวจเองทุกรายการ)', '#/providers');
+      }
+      add('setup', 'provider_wepay_ip', 'info', 'wePAY: แจ้ง IP ขาออกของเซิร์ฟเวอร์ให้ wePAY ลงทะเบียน และตั้ง WEPAY_DISCOUNTS ให้ตรงกับเงินคืนของบัญชี แล้วทดสอบเติมยอดเล็กก่อน (ดู docs/WEPAY-INTEGRATION.md)', '#/providers');
+    }
   }
   if (providersOk && providers.isLive()) add('setup', 'providers', 'ok', 'ผู้ให้บริการพร้อมรับรายการ');
 

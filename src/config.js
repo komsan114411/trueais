@@ -120,6 +120,21 @@ function buildConfig(env = process.env) {
     warnings.push(`${name}=${n} อยู่นอกช่วงที่ใช้ได้ (${range}) — ใช้ ${fixed} แทน`);
     return fixed;
   };
+  // รายการ เครือข่าย:ค่า คั่นด้วย , (เช่น AIS:1,DTAC:3) — ใส่เฉพาะเครือข่ายที่ต้องการเปลี่ยน ที่เหลือใช้ค่าเริ่มต้น
+  const pairs = (name, defaults, parse, hint) => {
+    const out = { ...defaults };
+    for (const part of list(env[name])) {
+      const m = /^([A-Za-z]+)\s*[:=]\s*(.+)$/.exec(part);
+      const net = m ? m[1].toUpperCase() : '';
+      const value = m ? parse(m[2].trim().toUpperCase()) : null;
+      if (!m || !Object.hasOwn(defaults, net) || value === null) {
+        warnings.push(`${name}: "${show(part)}" ไม่ถูกต้อง (ต้องเป็น ${Object.keys(defaults).join('/')}:${hint}) — ข้ามค่านี้`);
+        continue;
+      }
+      out[net] = value;
+    }
+    return out;
+  };
   // เปิด/ปิด: 1/true/yes/on = เปิด, 0/false/no/off = ปิด, ค่าอื่น = ค่าเริ่มต้น + เตือน (กันพิมพ์ผิดแล้วกลายเป็นปิดเงียบๆ)
   const flag = (name, def) => {
     const v = raw(name).toLowerCase();
@@ -210,6 +225,20 @@ function buildConfig(env = process.env) {
       secret: str(env.WONDD_API_SECRET),
       callbackSecret: str(env.WONDD_CALLBACK_SECRET),
       callbackIps: list(env.WONDD_CALLBACK_IPS),
+    },
+    wepay: {
+      apiUrl: str(env.WEPAY_API_URL, 'https://www.wepay.in.th/client_api.json.php').trim(),
+      username: str(env.WEPAY_USERNAME).trim(),
+      password: str(env.WEPAY_PASSWORD),
+      callbackIps: list(env.WEPAY_CALLBACK_IPS),
+      // รหัสบริการเติมเงินของ wePAY ต่อเครือข่าย (pay_to_company)
+      companies: pairs('WEPAY_COMPANIES', { AIS: '12CALL', DTAC: 'HAPPY', TRUE: 'TRMV' }, (v) => (/^[A-Z0-9-]{2,20}$/.test(v) ? v : null), 'รหัสบริการ (A-Z 0-9 -)'),
+      // เงินคืน (%) ที่บัญชี wePAY ได้ต่อเครือข่าย → ต้นทุน = ยอดเติม - เงินคืน (ค่าเริ่มต้นตามหน้า "บริการ" สมาชิกทั่วไป)
+      discountBp: pairs('WEPAY_DISCOUNTS', { AIS: 100, DTAC: 300, TRUE: 300 }, (v) => {
+        if (!/^\d{1,2}(\.\d{1,2})?$/.test(v)) return null;
+        const bp = Math.round(Number(v) * 100);
+        return bp <= 3000 ? bp : null;
+      }, 'เปอร์เซ็นต์ 0-30 เช่น 3 หรือ 1.5'),
     },
     notify: {
       lineToken: str(env.LINE_CHANNEL_ACCESS_TOKEN),

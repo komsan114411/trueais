@@ -195,7 +195,7 @@ export async function render(el, params, query) {
     const list = view.providers || [];
     const names = (arr) => [...new Set(arr.map(shortLabel))].join(' / ');
     PROV = {
-      primary: names(list.filter((p) => p.capabilities?.catalog !== 'mapped' && p.live)),
+      primary: names(list.filter((p) => (p.capabilities?.catalog || 'primary') === 'primary' && p.live)),
       mapped: names(list.filter((p) => p.capabilities?.catalog === 'mapped')),
     };
   }).catch(() => { PROV = { primary: '', mapped: '' }; });

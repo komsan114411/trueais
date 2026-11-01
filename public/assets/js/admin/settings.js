@@ -4,7 +4,7 @@ import { icon, store, ROUTING_KEYS, confirmRoutingChange, testNotify, shortLabel
 
 const CAP_LABELS = { statusCheck: 'เช็กสถานะรายการ', balance: 'เช็กเครดิต', products: 'ดึงรายการแพ็กเกจ', callback: 'รับแจ้งผล (callback)' };
 // คู่มือการเชื่อมต่อของแต่ละเจ้า (โฟลเดอร์ docs ของระบบ)
-const DOCS = { wondd: 'docs/WONDD-INTEGRATION.md', hubzell: 'docs/HUBZELL-INTEGRATION.md' };
+const DOCS = { wondd: 'docs/WONDD-INTEGRATION.md', hubzell: 'docs/HUBZELL-INTEGRATION.md', wepay: 'docs/WEPAY-INTEGRATION.md' };
 const fileSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 const backupUrl = (name) => `/api/admin/backups/${encodeURIComponent(name)}/download`;
 

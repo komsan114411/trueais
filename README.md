@@ -1,13 +1,16 @@
-# ระบบเติมเงินมือถือ & แพ็กเกจเน็ต — AIS • True • dtac (เชื่อมต่อ WonDD)
+# ระบบเติมเงินมือถือ & แพ็กเกจเน็ต — AIS • True • dtac (HubZell / wePAY / WonDD)
 
 ระบบเว็บไซต์ครบชุดสำหรับขายเติมเงินมือถือและแพ็กเกจเน็ต มีหน้าเว็บลูกค้า หลังบ้านแอดมิน กระเป๋าเงิน ประวัติทุกอย่าง
 และ API สำหรับเชื่อมกับเว็บไซต์อื่น ออกแบบเน้น **กันเติมซ้ำ กันเงินหาย และใช้งานง่าย**
 
 > ### ⚠️ สถานะการเชื่อมต่อผู้ให้บริการ (ร้าน)
 > - **HubZell:** เชื่อมตามคู่มือ API จริงแล้ว ใส่ API key/secret ก็ใช้ได้ — ดู [docs/HUBZELL-INTEGRATION.md](docs/HUBZELL-INTEGRATION.md)
+> - **wePAY:** เติมเงิน AIS / True / dtac (ยังไม่รองรับแพ็กเกจเน็ต) ใส่ชื่อผู้ใช้/รหัสผ่าน API และแจ้ง IP เซิร์ฟเวอร์ให้ wePAY — ดู [docs/WEPAY-INTEGRATION.md](docs/WEPAY-INTEGRATION.md)
 > - **WonDD:** ยังไม่เปิดใช้ API ให้บัญชีนี้ (คำขอ HN69110000001 รอตอบ) — เมื่อได้คู่มือ แก้ `src/providers/wondd.js` ตาม [docs/WONDD-INTEGRATION.md](docs/WONDD-INTEGRATION.md)
 > - ใช้ได้หลายร้านพร้อมกัน ลูกค้าเลือกร้านเองได้ ร้านไหนไม่รับรายการ ระบบส่งต่อร้านอื่นอัตโนมัติ
 > - ค่าเริ่มต้นเป็น **โหมดทดสอบ 2 ร้าน (ร้านทดสอบ A / B)** ใช้ได้ครบทุกฟีเจอร์โดยไม่มีการเติมเงินจริง
+>
+> **ฐานข้อมูล:** ตั้ง `DATABASE_URL` = **PostgreSQL** (แนะนำเมื่อขึ้นคลาวด์ เช่น Railway) · ไม่ตั้ง = **SQLite** ไฟล์เดียวในเครื่อง (`data/topup.db`) เปิดใช้ได้ทันทีไม่ต้องติดตั้งอะไร
 
 ---
 
@@ -192,20 +195,48 @@ TELEGRAM_CHAT_ID=123456789
    - `PUBLIC_URL=https://โดเมนจริง`
    - `TRUST_PROXY=loopback` (Nginx อยู่เครื่องเดียวกัน) หรือ `loopback,uniquelocal` (ใช้ docker-compose) — ตั้งเป็นตัวเลขก็ได้ ระบบจะเชื่อเฉพาะ proxy ในเครือข่ายภายใน (คนนอกปลอม IP ไม่ได้) / ถ้าใช้ Cloudflare โดยไม่มี Nginx ให้ใส่วง IP ของ Cloudflare
    - หลังสร้างแอดมินแล้ว **ลบ `ADMIN_PASSWORD` ออกจาก `.env`**
-3. รันด้วย Docker (ดู [รันด้วย Docker](#รันด้วย-docker) — พอร์ตเปิดเฉพาะในเครื่อง ให้ Nginx เป็นตัวรับจากภายนอก, ข้อมูลอยู่ใน `./data`) หรือ PM2: `pm2 start src/server.js --name topup --node-args="--disable-warning=ExperimentalWarning"` — **รันแค่ 1 ตัว** (ห้ามใช้ cluster หลาย process)
-4. ล็อกอินแอดมิน → เปิด **ยืนยันตัวตน 2 ชั้น** ที่หน้า "บัญชีของฉัน" และดู **รายการตรวจความปลอดภัย** บนแดชบอร์ดให้หมด
-5. ระบบ **สำรองฐานข้อมูลอัตโนมัติวันละครั้ง** ไว้ที่ `data/backups` (เก็บย้อนหลัง 14 วัน) — ควรดาวน์โหลด/คัดลอกไปเก็บนอกเครื่องด้วย ดู [สำรองข้อมูล / กู้คืน](#สำรองข้อมูล--กู้คืน)
-6. ตั้ง [แจ้งเตือน LINE / Telegram](#ตั้งค่าแจ้งเตือน-line--telegram) ให้รู้ทันทีเมื่อมีรายการต้องตรวจสอบ
-7. ทำตาม [docs/HUBZELL-INTEGRATION.md](docs/HUBZELL-INTEGRATION.md) (ร้านที่ใช้ HubZell อย่างเดียวตั้ง `PROVIDERS=hubzell`) และ [docs/WONDD-INTEGRATION.md](docs/WONDD-INTEGRATION.md) เมื่อ WonDD เปิด API แล้ว
+3. ฐานข้อมูล: ระบบจริงแนะนำ **PostgreSQL** (`DATABASE_URL=postgres://...`) — เคยใช้ SQLite มาก่อน ย้ายข้อมูลด้วย `npm run admin -- import-sqlite --yes`
+4. รันด้วย Docker (ดู [รันด้วย Docker](#รันด้วย-docker) — พอร์ตเปิดเฉพาะในเครื่อง ให้ Nginx เป็นตัวรับจากภายนอก, ข้อมูลอยู่ใน `./data`) หรือ PM2: `pm2 start src/server.js --name topup --node-args="--disable-warning=ExperimentalWarning"` — **รันแค่ 1 ตัว** (ห้ามใช้ cluster หลาย process)
+5. ล็อกอินแอดมิน → เปิด **ยืนยันตัวตน 2 ชั้น** ที่หน้า "บัญชีของฉัน" และดู **รายการตรวจความปลอดภัย** บนแดชบอร์ดให้หมด
+6. ระบบ **สำรองฐานข้อมูลอัตโนมัติวันละครั้ง** ไว้ที่ `data/backups` (เก็บย้อนหลัง 14 วัน) — ควรดาวน์โหลด/คัดลอกไปเก็บนอกเครื่องด้วย ดู [สำรองข้อมูล / กู้คืน](#สำรองข้อมูล--กู้คืน)
+7. ตั้ง [แจ้งเตือน LINE / Telegram](#ตั้งค่าแจ้งเตือน-line--telegram) ให้รู้ทันทีเมื่อมีรายการต้องตรวจสอบ
+8. ทำตาม [docs/HUBZELL-INTEGRATION.md](docs/HUBZELL-INTEGRATION.md) (ร้านที่ใช้ HubZell อย่างเดียวตั้ง `PROVIDERS=hubzell`), [docs/WEPAY-INTEGRATION.md](docs/WEPAY-INTEGRATION.md) (เพิ่มร้าน wePAY: `PROVIDERS=hubzell,wepay`) และ [docs/WONDD-INTEGRATION.md](docs/WONDD-INTEGRATION.md) เมื่อ WonDD เปิด API แล้ว
+
+---
+
+## ขึ้นระบบบน Railway
+
+โปรเจกต์นี้มี `Dockerfile` และ `railway.json` (ตรวจ `/api/health` + ปิดระบบอย่างปลอดภัย 40 วินาที) พร้อมใช้กับ Railway:
+
+1. Railway → **New Project → Deploy from GitHub repo** → เลือก repo นี้
+2. ในโปรเจกต์เดียวกัน **+ New → Database → PostgreSQL**
+3. บริการเว็บ → **Variables** ใส่อย่างน้อย:
+   ```ini
+   DATABASE_URL=${{Postgres.DATABASE_URL}}
+   NODE_ENV=production
+   PUBLIC_URL=https://<โดเมนของบริการ>.up.railway.app
+   TRUST_PROXY=<ดูข้อ 6>
+   ADMIN_EMAIL=อีเมลแอดมิน
+   ADMIN_PASSWORD=<รหัสผ่านยาวๆ ที่สุ่มขึ้นมา>
+   RAILWAY_RUN_UID=0
+   PROVIDERS=mock,mock2   # เปลี่ยนเป็นร้านจริงเมื่อพร้อม เช่น hubzell,wepay
+   ```
+4. บริการเว็บ → **Settings → Volumes** เพิ่ม Volume ที่ `/app/data` (เก็บสลิปและไฟล์สำรอง — ไม่มี Volume ไฟล์จะหายทุกครั้งที่ deploy)
+   `RAILWAY_RUN_UID=0` ทำให้โปรแกรมเขียนลง Volume ได้
+5. **Settings → Networking → Generate Domain** แล้วนำโดเมนไปใส่ `PUBLIC_URL`
+6. `TRUST_PROXY=1` — Railway รับคำขอผ่าน proxy ของ Railway ก่อนเสมอ ค่านี้ทำให้ระบบเห็น IP จริงของลูกค้า (ไม่ตั้ง = ทุกคนถูกมองเป็น IP เดียว การจำกัดความถี่/ล็อกการเข้าสู่ระบบจะกระทบทุกคน)
+7. ร้านที่ต้อง whitelist IP (HubZell / wePAY) ต้องเปิด **Static Outbound IP** ของ Railway (แผน Pro) แล้วนำ IP นั้นไปลงทะเบียน
+8. รันแค่ **1 replica** (งานเบื้องหลังเช็กสถานะ/ส่ง webhook ออกแบบให้ทำงานที่เดียว)
+9. คำสั่งแอดมินจากเครื่องตัวเอง: ติดตั้ง Railway CLI → `railway link` แล้ว `railway ssh` เข้าเครื่อง แล้วสั่ง `node --disable-warning=ExperimentalWarning scripts/admin.js list`
 
 ---
 
 ## รันด้วย Docker
 
-ใช้ `docker-compose.yml` ที่มากับระบบ (บริการชื่อ `topup` ข้อมูลทั้งหมดเก็บในโฟลเดอร์ `./data` ของเครื่อง):
+ใช้ `docker-compose.yml` ที่มากับระบบ (บริการ `topup` + ฐานข้อมูล PostgreSQL `db` — ฐานข้อมูลอยู่ใน volume `pgdata`, สลิปและไฟล์สำรองอยู่ในโฟลเดอร์ `./data`):
 
 ```bash
-cp .env.example .env              # แล้วแก้ค่าใน .env ให้ครบก่อน
+cp .env.example .env              # แล้วแก้ค่าใน .env ให้ครบก่อน (ต้องตั้ง POSTGRES_PASSWORD)
 mkdir -p data
 docker compose up -d --build      # สร้างและเปิดระบบ (เปิดใหม่อัตโนมัติเมื่อเครื่องรีสตาร์ท)
 docker compose logs -f topup      # ดูว่าเปิดสำเร็จไหม (Ctrl+C = เลิกดู ระบบยังทำงานต่อ)
@@ -223,10 +254,10 @@ docker compose logs -f topup      # ดูว่าเปิดสำเร็�
 
 ## สำรองข้อมูล / กู้คืน
 
-ข้อมูลทั้งหมดอยู่ในโฟลเดอร์ **`data`**: `data/topup.db` (ฐานข้อมูล — ผู้ใช้ ยอดเงิน รายการ ตั้งค่า) และ `data/uploads` (ไฟล์สลิป)
+ข้อมูลอยู่ 2 ที่: **ฐานข้อมูล** (ผู้ใช้ ยอดเงิน รายการ ตั้งค่า — SQLite = `data/topup.db`, PostgreSQL = ตาม `DATABASE_URL`) และ **ไฟล์สลิป** ใน `data/uploads`
 
 ### สำรอง
-- ระบบสำรองฐานข้อมูลให้ **อัตโนมัติวันละครั้ง** ไว้ที่ `data/backups` ชื่อไฟล์ตามวันเวลาไทย เช่น `topup-2026-11-02-0930.db`
+- ระบบสำรองฐานข้อมูลให้ **อัตโนมัติวันละครั้ง** ไว้ที่ `data/backups` ชื่อไฟล์ตามวันเวลาไทย เช่น `topup-2026-11-02-0930.db` (SQLite) หรือ `topup-2026-11-02-0930.json.gz` (PostgreSQL — ทุกตารางจาก snapshot เดียวกัน)
   — เก็บ **ชุดล่าสุดของแต่ละวันย้อนหลัง 14 วัน + 10 ชุดล่าสุด** (นับรวมชุดที่กดสำรองเอง) ที่เก่ากว่านั้นถูกลบอัตโนมัติ
 - สำรองทันที (ทำได้ขณะระบบเปิดอยู่): ดับเบิลคลิก **`backup-now.bat`** หรือหน้าแอดมิน → ตั้งค่า → **สำรองตอนนี้** หรือ `npm run admin -- backup`
 - ไฟล์สำรองอยู่ในเครื่องเดียวกับระบบ — **เก็บสำเนานอกเครื่องเป็นประจำ** (แฟลชไดรฟ์ / Google Drive) เผื่อเครื่องเสีย:
@@ -234,6 +265,14 @@ docker compose logs -f topup      # ดูว่าเปิดสำเร็�
   (ไฟล์สำรองมีแต่ฐานข้อมูล ไม่รวมไฟล์สลิปใน `data/uploads`)
 
 ### กู้คืนจากไฟล์สำรอง
+
+**PostgreSQL** (ไฟล์ `.json.gz`): ปิดระบบก่อน แล้วสั่ง
+```bash
+npm run admin -- restore data/backups/topup-2026-11-02-0930.json.gz --yes
+```
+(ระบบตรวจว่าไฟล์ครบก่อนเริ่ม และกู้ใน transaction เดียว — ผิดพลาดกลางทาง = ข้อมูลเดิมไม่ถูกแตะ) แล้วเปิดระบบ ตรวจยอดด้วย `npm run admin -- reconcile`
+
+**SQLite** (ไฟล์ `.db`):
 1. **ปิดระบบก่อน** — กด Ctrl+C ในหน้าต่าง start.bat (Docker: `docker compose stop`)
 2. (แนะนำ) เก็บของเดิมไว้เผื่อ: สร้างโฟลเดอร์ `data/old` แล้วย้าย `topup.db` พร้อม `topup.db-wal` และ `topup.db-shm` (ถ้ามี) ไปไว้ในนั้น
 3. คัดลอกไฟล์สำรองที่เลือกจาก `data/backups` มาไว้ที่ `data/` แล้วเปลี่ยนชื่อเป็น **`topup.db`** (ทับไฟล์เดิม)
@@ -261,6 +300,9 @@ docker compose logs -f topup      # ดูว่าเปิดสำเร็�
 | `npm run admin -- backup` | สำรองฐานข้อมูลทันที (หรือ `backup-now.bat`) |
 | `npm run admin -- notify-test` | ทดสอบส่งแจ้งเตือน LINE / Telegram ตามค่าใน `.env` |
 | `npm run admin -- reconcile` | ตรวจว่ายอดกระเป๋าทุกบัญชีตรงกับสมุดบัญชี |
+| `npm run admin -- restore <ไฟล์.json.gz> --yes` | (PostgreSQL) กู้คืนจากไฟล์สำรอง — แทนที่ข้อมูลทั้งหมด |
+| `npm run admin -- import-sqlite --yes` | ย้ายข้อมูลจาก SQLite เดิม (`data/topup.db`) เข้า PostgreSQL ตาม `DATABASE_URL` (ไฟล์เดิมไม่ถูกแก้) |
+| `npm run test:pg` | รันชุดทดสอบทั้งหมดกับ PostgreSQL (จำลองในหน่วยความจำ ไม่ต้องติดตั้งเพิ่ม) |
 
 `--user` ใส่อีเมลหรือเบอร์โทรก็ได้ (`--email` แบบเดิมยังใช้ได้) • ทุกคำสั่งที่แก้บัญชีถูกบันทึกใน Log การกระทำของแอดมิน (ผู้ทำ = ระบบ, `via: cli`) •
 PowerShell ขึ้นว่า *running scripts is disabled* → พิมพ์ `npm.cmd` แทน `npm`
@@ -276,9 +318,11 @@ scripts/admin.js       คำสั่งแอดมิน (npm run admin -- ..
 src/
   server.js            จุดเริ่มระบบ (เปิดไม่สำเร็จ → บอกบรรทัดเดียวว่าต้องแก้ค่าไหนใน .env)
   config.js            อ่านค่า .env (รองรับหมายเหตุท้ายบรรทัด / เครื่องหมายคำพูด) + ตรวจค่า
-  db.js                ฐานข้อมูล SQLite (ในตัว Node.js) + ตาราง + ข้อมูลเริ่มต้น
+  db.js                ฐานข้อมูล: PostgreSQL (DATABASE_URL) หรือ SQLite (ไฟล์ในเครื่อง) — คำสั่งชุดเดียวกัน
+  database/            ตาราง (schema-*.js), ตัวเชื่อม SQLite/PostgreSQL, ข้อมูลเริ่มต้น, สำรอง/ย้ายข้อมูล
   providers/
     hubzell.js         ตัวเชื่อม HubZell (ตามคู่มือ API จริง ลงลายเซ็น HMAC)
+    wepay.js           ตัวเชื่อม wePAY (เติมเงิน — ตรวจจุด [CHECK] เมื่อได้คู่มือจริง)
     wondd.js           ← ตัวเชื่อม WonDD (แก้ตามคู่มือจริงที่จุด [MAP])
     mock.js            ร้านทดสอบ A / B สำหรับทดสอบ
     base.js            มาตรฐานกลาง + HTTP + log + แยก timeout/ส่งไม่ถึง
@@ -301,7 +345,7 @@ src/
 public/                หน้าเว็บลูกค้า (index.html) และหลังบ้าน (admin.html)
 docs/                  คู่มือเชื่อม WonDD และ API ร้านค้า
 test/                  ชุดทดสอบอัตโนมัติ
-data/                  ฐานข้อมูลและไฟล์สลิป (สร้างอัตโนมัติ — ต้องสำรอง)
+data/                  ไฟล์สลิป ไฟล์สำรอง และฐานข้อมูล SQLite (สร้างอัตโนมัติ — ต้องสำรอง)
 ```
 
 ฐานข้อมูลเก็บเงินเป็น **สตางค์ (จำนวนเต็ม)** ทั้งหมด เพื่อไม่ให้เกิดเศษทศนิยมเพี้ยน

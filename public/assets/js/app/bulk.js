@@ -74,6 +74,7 @@ function validate(lines, defNet, defAmount, shopCode) {
       if (n && fixed) {
         if (fixed.length && !fixed.includes(amount)) errors.push(`${shop.name} มีเฉพาะยอด ${fixed.join(', ')} บาท`);
       } else if (n && (amount * 100 < n.topup.min || amount * 100 > n.topup.max)) errors.push(`ยอด ${bahtShort(n.topup.min)}-${bahtShort(n.topup.max)} บาท`);
+      else if (sn && ((sn.min != null && amount < sn.min) || (sn.max != null && amount > sn.max))) errors.push(`${shop.name} รับยอด ${sn.min}-${sn.max} บาท`);
       else if (n && !(sn ? sn.custom : n.topup.allow_custom) && !n.topup.presets.includes(amount)) errors.push(`เติมได้เฉพาะ ${n.topup.presets.join(', ')}`);
     }
     if (r.extra.length) errors.push(`มีข้อมูลเกิน "${r.extra.join(' ')}"`);

@@ -1,6 +1,6 @@
 'use strict';
 /**
- * ทะเบียนผู้ให้บริการ — ใช้ได้หลายเจ้าพร้อมกัน (PROVIDERS=hubzell,wondd)
+ * ทะเบียนผู้ให้บริการ — ใช้ได้หลายเจ้าพร้อมกัน (PROVIDERS=hubzell,wepay,wondd)
  *   configured() = เจ้าที่เปิดใช้ใน .env ตามลำดับ
  *   ordered()    = ลำดับจริงที่ใช้เลือก (แอดมินจัดลำดับ/ปิดชั่วคราวได้ในหน้าตั้งค่า)
  * การเลือกเจ้าสำหรับแต่ละรายการอยู่ที่ services/router.js
@@ -9,8 +9,9 @@ const config = require('../config');
 const mock = require('./mock');
 const wondd = require('./wondd');
 const hubzell = require('./hubzell');
+const wepay = require('./wepay');
 
-const registry = { mock, mock2: mock.mock2, wondd, hubzell };
+const registry = { mock, mock2: mock.mock2, wondd, hubzell, wepay };
 
 function configured() {
   const names = [...new Set(config.provider.list)];

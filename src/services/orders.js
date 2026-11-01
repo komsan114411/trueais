@@ -568,6 +568,9 @@ function recordActualCost(order, attemptNo, pick, result) {
     if (charged > order.price && pick.mapId) {
       db.run('UPDATE provider_map SET enabled = 0, updated_at = ? WHERE id = ?', now, pick.mapId);
       alertAdmin(`cost-up-${pick.mapId}`, `${pick.provider.label} ขึ้นราคา: รายการ ${order.ref} ต้นทุนจริง ${fmt(charged)} บาท สูงกว่าราคาขาย ${fmt(order.price)} บาท — ระบบปิดการจับคู่บริการ ${pick.code} แล้ว กรุณาปรับราคา/ดึงรายการใหม่`, { cooldownSec: 60 });
+    } else if (charged > order.price) {
+      // ร้านที่คิดต้นทุนจากอัตราเงินคืน (เช่น wePAY) — อัตราที่ตั้งไว้สูงกว่าที่ได้จริง
+      alertAdmin(`cost-up-${pick.name}-${order.network_code}`, `${pick.provider.label} ตัดเงินรายการ ${order.ref} ${fmt(charged)} บาท สูงกว่าราคาขาย ${fmt(order.price)} บาท — ตรวจอัตราเงินคืนที่ตั้งไว้ (เช่น WEPAY_DISCOUNTS) และส่วนลดลูกค้าของร้านนี้`, { cooldownSec: 600 });
     }
   });
 }
@@ -846,6 +849,14 @@ function applyCallback(providerName, update) {
   const provider = providers.byName(providerName);
   if (update.trust !== 'signed') {
     if (provider?.capabilities?.statusCheck) {
+      // เก็บเลขที่รายการฝั่งผู้ให้บริการจาก callback ไว้ใช้เช็กสถานะ (เช่น wePAY: คำขอส่งหมดเวลารอ จึงยังไม่มีเลข)
+      // ยังไม่ขยับเงิน — ผลที่เช็กได้ต้องมีเลขที่รายการของเราตรงกันถึงจะนำมาใช้
+      if (update.providerTxnId) {
+        db.run(
+          "UPDATE order_attempts SET provider_txn_id = ?, updated_at = ? WHERE order_id = ? AND provider = ? AND state != 'rejected' AND provider_txn_id IS NULL",
+          String(update.providerTxnId).slice(0, 100), db.nowIso(), o.id, providerName,
+        );
+      }
       addEvent(o.id, o.status, 'callback', `ผู้ให้บริการแจ้งผล "${update.outcome}" — กำลังเช็กสถานะยืนยันอีกครั้งก่อนบันทึกผล`, { internal: true, providerStatus: update.providerStatus || null });
       setImmediate(() => { checkNow(o.id, 'callback').catch((e) => logger.error(`ยืนยันผล callback ${update.ref} ไม่สำเร็จ`, e)); });
       return { ok: true, verifying: true };

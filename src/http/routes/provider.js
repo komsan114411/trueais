@@ -1,5 +1,5 @@
 'use strict';
-// /api/provider/callback/:name — รับแจ้งผลจากผู้ให้บริการ (WonDD / mock)
+// /api/provider/callback/:name — รับแจ้งผลจากผู้ให้บริการ (HubZell / wePAY / WonDD / mock)
 // ต้องติดตั้งก่อน body parser ตัวหลัก เพราะต้องใช้ข้อมูลดิบ (raw body) ตรวจลายเซ็น
 const express = require('express');
 const providers = require('../../providers');
@@ -43,7 +43,7 @@ router.all('/callback/:name', express.raw({ type: () => true, limit: '100kb' }),
         applied.push({ ref: u.ref, outcome: u.outcome, ...orders.applyCallback(provider.name, u) });
       } catch (err) {
         logger.error(`อัปเดตจาก callback ไม่สำเร็จ ${u.ref}`, err);
-        applied.push({ ref: u.ref, ok: false, reason: err.message });
+        applied.push({ ref: u.ref, ok: false, reason: err.message, crashed: true });
       }
     }
   }
@@ -63,7 +63,9 @@ router.all('/callback/:name', express.raw({ type: () => true, limit: '100kb' }),
     durationMs: Date.now() - started,
   });
 
-  const reply = result.ok ? result.response || { status: 200, body: 'OK' } : { status: result.status || 400, body: result.body || 'error' };
+  // บันทึกไม่สำเร็จ (ระบบขัดข้อง) → ตอบแบบที่ทำให้ผู้ให้บริการส่งซ้ำ ถ้าผู้ให้บริการกำหนดไว้ (เช่น wePAY: ERROR|...)
+  const crashed = applied.some((a) => a.crashed) && result.errorResponse;
+  const reply = crashed ? result.errorResponse : result.ok ? result.response || { status: 200, body: 'OK' } : { status: result.status || 400, body: result.body || 'error' };
   res.status(reply.status).type('text/plain').send(String(reply.body));
 });
 

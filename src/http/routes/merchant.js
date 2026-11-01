@@ -41,7 +41,10 @@ router.get('/products', (req, res) => {
     // ร้านที่เลือกได้ (ส่ง shop ใน POST /orders) — ราคาเติมเงิน = ยอด - ส่วนลดของร้าน
     shops: c.shops.map((s) => ({
       code: s.code, name: s.name, available: !s.paused,
-      topup: Object.fromEntries(Object.entries(s.networks).map(([n, v]) => [n, { discount_percent: v.discount_bp / 100, amounts: v.amounts, allow_custom: v.custom }])),
+      topup: Object.fromEntries(Object.entries(s.networks).map(([n, v]) => [n, {
+        discount_percent: v.discount_bp / 100, amounts: v.amounts, allow_custom: v.custom,
+        ...(v.min !== undefined ? { min: v.min, max: v.max } : {}),
+      }])),
       package_codes: c.products.filter((p) => s.product_ids.includes(p.id)).map((p) => p.code),
     })),
   });

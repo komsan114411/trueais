@@ -40,10 +40,29 @@ function mappedAmounts(code, net) {
     .map((m) => m.face_value);
 }
 
+/**
+ * ช่วงยอดเติม (สตางค์) ของร้านที่รับยอดตามช่วงของตัวเอง (เช่น wePAY: dtac ไม่เกิน 800 บาท)
+ *   undefined = ร้านนี้ไม่มีช่วงของตัวเอง (ใช้ช่วงของเครือข่าย) | null = ร้านนี้ไม่มีบริการเครือข่ายนี้ | { min, max }
+ */
+function topupRange(code, net) {
+  const p = providers.byName(code);
+  if (typeof p?.topupLimits !== 'function') return undefined;
+  const lim = p.topupLimits(net.code);
+  if (!lim) return null;
+  const min = Math.max(lim.min, net.topup_min);
+  const max = Math.min(lim.max, net.topup_max);
+  return min <= max ? { min, max } : null;
+}
+
 /** ร้านนี้ขายยอดนี้ไม่ได้ → คืนข้อความเหตุผล (ขายได้ = null) */
 function topupBlocked(code, net, face) {
   const amounts = mappedAmounts(code, net);
   if (amounts && !amounts.includes(face)) return `${displayName(code)} ไม่มียอด ${fmt(face)} บาท ของ ${net.name} — กรุณาเลือกยอดอื่น หรือร้านอื่น`;
+  const range = topupRange(code, net);
+  if (range === null) return `${displayName(code)} ไม่มีบริการเติมเงิน ${net.name} — กรุณาเลือกร้านอื่น`;
+  if (range && (face < range.min || face > range.max)) {
+    return `${displayName(code)} รับยอดเติม ${net.name} ตั้งแต่ ${fmt(range.min)} ถึง ${fmt(range.max)} บาท — กรุณาเลือกยอดอื่น หรือร้านอื่น`;
+  }
   return null;
 }
 
@@ -53,6 +72,7 @@ function topupBlocked(code, net, face) {
  *   ร้านแบบจับคู่บริการ (HubZell) → ต้องมีการจับคู่ที่ "เปิดใช้" และไม่ขาดทุน (ปิดการจับคู่แล้ว = ไม่แสดงให้เลือก)
  */
 function sellsPackage(code, product) {
+  if (providers.byName(code)?.capabilities?.packages === false) return false; // ร้านที่ขายเฉพาะเติมเงิน (เช่น wePAY)
   const origin = product.origin || 'primary';
   if (!isMapped(code)) return origin === 'primary';
   const m = db.get("SELECT cost FROM provider_map WHERE provider = ? AND kind = 'package' AND product_id = ? AND enabled = 1", code, product.id);
@@ -77,11 +97,15 @@ function publicShops(networks, products) {
     paused: breaker.isOpen(code),
     networks: Object.fromEntries(networks.map((n) => {
       const amounts = mappedAmounts(code, n);
+      const range = topupRange(code, n);
+      if (range === null) return [n.code, { discount_bp: discountBp(code, n), amounts: [], custom: false }];
       return [n.code, {
         discount_bp: discountBp(code, n),
         // null = เติมได้ทุกยอดตามที่เครือข่ายกำหนด (ปุ่มยอด + กรอกเอง) / array = เฉพาะยอดเหล่านี้ (บาท)
         amounts: amounts ? amounts.map((a) => a / 100) : null,
         custom: amounts ? false : Boolean(n.topup_allow_custom),
+        // ร้านที่รับยอดตามช่วงของตัวเอง (บาท) — ปุ่มยอดนอกช่วงไม่แสดง
+        ...(range ? { min: range.min / 100, max: range.max / 100 } : {}),
       }];
     })),
     product_ids: products.filter((p) => sellsPackage(code, p)).map((p) => p.id),
@@ -90,6 +114,8 @@ function publicShops(networks, products) {
 
 /** ส่วนลดสูงสุดที่ตั้งได้โดยไม่ขาดทุน (bp) สำหรับร้าน+เครือข่ายนี้ */
 function maxDiscountBp(code, net) {
+  const p = providers.byName(code);
+  if (typeof p?.costDiscountBp === 'function') return p.costDiscountBp(net.code);
   if (!isMapped(code)) return net.provider_discount_bp;
   const maps = db.all("SELECT face_value, cost FROM provider_map WHERE provider = ? AND kind = 'topup' AND network_code = ? AND enabled = 1", code, net.code);
   if (!maps.length) return 10000;
@@ -170,4 +196,4 @@ function update(code, input, actor, ip, networks) {
   return adminList(networks).find((s) => s.code === c);
 }
 
-module.exports = { displayName, visible, discountBp, mappedAmounts, topupBlocked, sellsPackage, resolve, publicShops, adminList, update, maxDiscountBp };
+module.exports = { displayName, visible, discountBp, mappedAmounts, topupRange, topupBlocked, sellsPackage, resolve, publicShops, adminList, update, maxDiscountBp };

@@ -57,6 +57,8 @@ curl https://topup.example.com/api/v1/balance -H "Authorization: Bearer tk_xxx"
 
 - ราคาเติมเงินที่ร้าน S = ยอด − ส่วนลดของร้าน S (`discount_percent`) ปัดเศษส่วนลดลง
 - `amounts` = ร้านนี้ขายได้เฉพาะยอดเหล่านี้ (`null` = ได้ทุกยอดตาม `networks[].topup`)
+- `min` / `max` (มีเฉพาะบางร้าน เช่น `wepay`) = ร้านนี้รับยอดเติมเครือข่ายนั้นในช่วงนี้เท่านั้น (บาท) — ยอดนอกช่วงได้ `400 AMOUNT_NOT_AT_SHOP` และไม่ตัดเงิน
+- ร้าน `wepay` ขายเฉพาะเติมเงิน (`package_codes` ว่าง)
 
 ## POST /orders — สั่งเติมเงิน / สมัครแพ็กเกจ
 
