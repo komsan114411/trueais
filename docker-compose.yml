@@ -1,0 +1,18 @@
+# ใช้งาน: docker compose up -d   (ข้อมูลทั้งหมดเก็บใน ./data)
+#
+# พอร์ตเปิดเฉพาะในเครื่อง (127.0.0.1) — ให้ Nginx/Caddy บนเครื่องเป็นตัวรับจากอินเทอร์เน็ตพร้อม HTTPS
+# แล้วตั้ง .env: TRUST_PROXY=loopback,uniquelocal  และ PUBLIC_URL=https://โดเมนของคุณ
+# (ถ้าจำเป็นต้องเปิดพอร์ตตรงโดยไม่มี proxy ให้ลบ "127.0.0.1:" ออก และเว้น TRUST_PROXY ว่าง)
+services:
+  topup:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=3000
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./data:/app/data
+    stop_grace_period: 40s

@@ -1,0 +1,21 @@
+{
+  "name": "wondd-topup",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ระบบเติมเงินมือถือและแพ็กเกจเน็ต AIS / True / dtac เชื่อมต่อ WonDD API",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch src/server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 test/*.test.js",
+    "admin": "node --disable-warning=ExperimentalWarning scripts/admin.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "qrcode": "^1.5.4"
+  }
+}
