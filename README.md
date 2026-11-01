@@ -215,12 +215,14 @@ TELEGRAM_CHAT_ID=123456789
    DATABASE_URL=${{Postgres.DATABASE_URL}}
    NODE_ENV=production
    PUBLIC_URL=https://<โดเมนของบริการ>.up.railway.app
-   TRUST_PROXY=<ดูข้อ 6>
-   ADMIN_EMAIL=อีเมลแอดมิน
-   ADMIN_PASSWORD=<รหัสผ่านยาวๆ ที่สุ่มขึ้นมา>
+   TRUST_PROXY=1
+   ADMIN_EMAIL=อีเมลสำหรับเข้าหลังบ้าน
    RAILWAY_RUN_UID=0
    PROVIDERS=mock,mock2   # เปลี่ยนเป็นร้านจริงเมื่อพร้อม เช่น hubzell,wepay
    ```
+   ไม่ต้องใส่ `ADMIN_PASSWORD` — ตอนเปิดครั้งแรกระบบสุ่มรหัสผ่านแอดมินให้ ดูได้ที่ **Deployments → View logs** (บรรทัด "รหัสผ่าน :")
+   และในไฟล์ `/app/data/ADMIN-PASSWORD.txt` — ล็อกอินแล้วเปลี่ยนรหัสผ่าน + เปิดยืนยันตัวตน 2 ชั้นทันที
+   (รหัสผ่านฐานข้อมูลและรหัสลับภายในของระบบ Railway/ระบบสุ่มให้เองเช่นกัน ไม่ต้องตั้ง)
 4. บริการเว็บ → **Settings → Volumes** เพิ่ม Volume ที่ `/app/data` (เก็บสลิปและไฟล์สำรอง — ไม่มี Volume ไฟล์จะหายทุกครั้งที่ deploy)
    `RAILWAY_RUN_UID=0` ทำให้โปรแกรมเขียนลง Volume ได้
 5. **Settings → Networking → Generate Domain** แล้วนำโดเมนไปใส่ `PUBLIC_URL`
