@@ -20,6 +20,7 @@
 const config = require('../config');
 const db = require('../db');
 const settings = require('../services/settings');
+require('../services/credentials'); // คีย์ร้านที่แอดมินใส่ในหลังบ้าน (ติดตั้งให้ config.hubzell / config.wepay อ่านได้)
 const { hmacSha256 } = require('../lib/security');
 
 const SECRET_KEYS = /pass|secret|key|token|sign|auth/i;

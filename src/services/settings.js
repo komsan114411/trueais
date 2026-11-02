@@ -58,10 +58,12 @@ const SCHEMA = {
 let cache = null;
 
 function load() {
-  cache = {};
+  // อ่านให้ครบก่อนค่อยใช้ — อ่านไม่สำเร็จ (เช่น ฐานข้อมูลยังไม่เปิด) จะได้ลองใหม่ครั้งหน้า ไม่ค้างเป็นค่าว่าง
+  const next = {};
   for (const row of db.all('SELECT key, value FROM settings')) {
-    try { cache[row.key] = JSON.parse(row.value); } catch { /* ข้ามค่าที่เสีย */ }
+    try { next[row.key] = JSON.parse(row.value); } catch { /* ข้ามค่าที่เสีย */ }
   }
+  cache = next;
 }
 
 function all() {

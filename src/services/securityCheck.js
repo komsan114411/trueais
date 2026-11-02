@@ -73,6 +73,7 @@ function checklist(admin) {
   const providers = require('../providers');
   const shops = require('./shops');
   const catalog = require('./catalog');
+  const credentials = require('./credentials');
   const s = settings.all();
   const items = [];
   const add = (group, key, level, message, link) => items.push({ key, level, message, group, ...(link ? { link } : {}) });
@@ -104,7 +105,12 @@ function checklist(admin) {
 
   // ───── ผู้ให้บริการ / ร้าน ─────
   if (!providers.isLive()) {
-    add('setup', 'live', isPublicSite() ? 'warn' : 'info', `ยังเป็นโหมดทดสอบ (ร้านทดสอบ) — รายการจะไม่ถูกเติมจริง ใส่คีย์ของร้านจริงและตั้ง PROVIDERS ใน ${envWhere()} ก่อนเปิดร้าน (ขั้นตอนใน docs/GO-LIVE.md)`, '#/providers');
+    add('setup', 'live', isPublicSite() ? 'warn' : 'info', `ยังเป็นโหมดทดสอบ (ร้านทดสอบ) — รายการจะไม่ถูกเติมจริง ตั้ง PROVIDERS ใน ${envWhere()} เป็นร้านจริง แล้วใส่คีย์ร้านที่หน้า "ผู้ให้บริการ & ร้าน" ก่อนเปิดร้าน (ขั้นตอนใน docs/GO-LIVE.md)`, '#/providers');
+  }
+  // คีย์ที่ใส่ในหลังบ้านแต่ถอดรหัสไม่ได้ (ไฟล์กุญแจหาย/เปลี่ยน เช่น ย้ายเครื่อง หรือกู้จากไฟล์สำรอง) → ระบบใช้ค่าจาก environment แทน
+  const lost = credentials.unreadableGroups();
+  if (lost.length) {
+    add('setup', 'credentials_unreadable', 'warn', `คีย์ที่บันทึกไว้ในหลังบ้านใช้ไม่ได้: ${lost.join(', ')} — ไฟล์กุญแจเข้ารหัส (data/credentials.key) หายหรือเปลี่ยน ให้ใส่คีย์ใหม่อีกครั้ง`, '#/providers');
   }
   // ร้านจริงรับคำขอเฉพาะจาก IP ที่ลงทะเบียนไว้ — Railway แผน Hobby เปลี่ยน IP ขาออกได้ทุกครั้งที่ deploy
   const ipNote = onRailway() ? ' — บน Railway ต้องใช้แผน Pro แล้วเปิด Static Outbound IPs (Settings → Networking) และแจ้ง IP ทุกตัวที่ Railway แสดง' : '';
@@ -115,7 +121,8 @@ function checklist(admin) {
     const st = p.configStatus();
     if (!st.ready) {
       providersOk = false;
-      add('setup', `provider_${name}`, 'warn', `${p.label} ยังตั้งค่าไม่ครบ (${st.missing.join(', ')}) — ระบบจะไม่ส่งรายการไปร้านนี้`, '#/providers');
+      const how = credentials.groupView(name) ? 'กด "ใส่คีย์ร้าน" ที่การ์ดร้านนี้ในหน้า "ผู้ให้บริการ & ร้าน"' : `แก้ใน ${envWhere()} แล้วรีสตาร์ทระบบ`;
+      add('setup', `provider_${name}`, 'warn', `${p.label} ยังตั้งค่าไม่ครบ (${st.missing.join(', ')}) — ${how} · ระหว่างนี้ระบบไม่ส่งรายการไปร้านนี้`, '#/providers');
     }
     if (st.ready && p.capabilities.catalog === 'mapped') {
       const n = db.get('SELECT COUNT(*) AS c FROM provider_map WHERE provider = ? AND enabled = 1', name).c;
@@ -132,7 +139,7 @@ function checklist(admin) {
         add('setup', 'provider_wepay_https', 'warn', 'wePAY แจ้งผลรายการกลับมาที่ PUBLIC_URL — ต้องเป็น https:// ที่เปิดจากอินเทอร์เน็ตได้ (ไม่อย่างนั้นรายการที่หมดเวลารอจะรู้ผลไม่ได้ ต้องตรวจเองทุกรายการ)', '#/providers');
       }
       if (!config.wepay.discountsSet) {
-        add('setup', 'provider_wepay_discounts', 'info', `wePAY: ตั้ง WEPAY_DISCOUNTS ใน ${envWhere()} ให้ตรงกับเงินคืนของบัญชีคุณ (ตอนนี้ใช้ค่ามาตรฐาน AIS 1% / dtac 3% / True 3%) — ระบบใช้คิดต้นทุนกันขายขาดทุน`, '#/providers');
+        add('setup', 'provider_wepay_discounts', 'info', 'wePAY: ใส่เงินคืนของบัญชีคุณที่ปุ่ม "คีย์ร้าน" ของ wePAY (ตอนนี้ใช้ค่ามาตรฐาน AIS 1% / dtac 3% / True 3%) — ระบบใช้คิดต้นทุนกันขายขาดทุน', '#/providers');
       }
     }
     // เชื่อมต่อร้านจริงได้หรือยัง: เช็กเครดิตสำเร็จ = คีย์ถูก + IP ลงทะเบียนแล้ว (ระบบเช็กทุก 5 นาที)
@@ -173,7 +180,7 @@ function checklist(admin) {
   // ───── แจ้งเตือน ─────
   const ch = channels();
   if (!ch.line && !ch.telegram) {
-    add('setup', 'notify', 'info', `ยังไม่ได้ตั้งค่าแจ้งเตือนผ่าน LINE หรือ Telegram (${envWhere()}) — จะไม่รู้ทันทีเมื่อมีรายการต้องตรวจสอบหรือสลิปรออนุมัติ`, '#/settings');
+    add('setup', 'notify', 'info', 'ยังไม่ได้ตั้งค่าแจ้งเตือนผ่าน LINE หรือ Telegram (ใส่ token ได้ที่หน้าตั้งค่า → แจ้งเตือนแอดมิน) — จะไม่รู้ทันทีเมื่อมีรายการต้องตรวจสอบหรือสลิปรออนุมัติ', '#/settings?focus=notify');
   } else {
     add('setup', 'notify', 'ok', 'ตั้งค่าแจ้งเตือนแล้ว (กด "ส่งข้อความทดสอบ" เพื่อตรวจว่าได้รับจริง)', '#/settings');
   }

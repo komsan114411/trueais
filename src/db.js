@@ -130,5 +130,6 @@ module.exports = {
   dialect: () => (impl ? impl.dialect : isPostgres() ? 'postgres' : 'sqlite'),
   schemaVersion: () => need().schemaVersion(),
   inTx: () => Boolean(impl && impl.inTx()),
+  isOpen: () => Boolean(impl),
   raw: () => (impl ? impl.raw() : null),
 };

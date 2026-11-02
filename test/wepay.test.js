@@ -269,7 +269,7 @@ test('แดชบอร์ด "พร้อมเปิดร้าน": บอ
     assert.match(conn.message, /รหัสผ่าน/);
     assert.match(conn.message, /Static Outbound IPs/, 'บน Railway บอกให้เปิด IP คงที่');
     assert.equal(find(list, 'providers'), undefined);
-    assert.match(find(list, 'provider_wepay_discounts')?.message || '', /Variables ของ Railway/);
+    assert.match(find(list, 'provider_wepay_discounts')?.message || '', /คีย์ร้าน/, 'บอกให้ใส่เงินคืนในหลังบ้าน (ไม่ต้องไปแก้ Railway)');
     assert.match(securityCheck.configWarnings().join('\n'), /RAILWAY_DEPLOYMENT_DRAINING_SECONDS=40/);
     config.drainingSeconds = 40;
     assert.doesNotMatch(securityCheck.configWarnings().join('\n'), /RAILWAY_DEPLOYMENT_DRAINING_SECONDS/);

@@ -1,8 +1,9 @@
 'use strict';
-// แจ้งเตือนแอดมินผ่าน LINE Messaging API / Telegram (ตั้งค่าใน .env) และบันทึกไว้ในระบบเสมอ
+// แจ้งเตือนแอดมินผ่าน LINE Messaging API / Telegram (ตั้งในหลังบ้าน หรือ .env) และบันทึกไว้ในระบบเสมอ
 const config = require('../config');
 const logger = require('./logger');
 const audit = require('../services/audit');
+require('../services/credentials'); // token ที่แอดมินใส่ในหลังบ้าน (ติดตั้งให้ config.notify อ่านได้)
 
 const lastSent = new Map();
 

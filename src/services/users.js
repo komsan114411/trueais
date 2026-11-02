@@ -360,11 +360,11 @@ async function totpDisable(user, { password, code }, { ip, sessionId } = {}) {
  * ใช้กับการกระทำที่มีผลกับบัญชีแอดมิน: ตั้งรหัสผ่านใหม่ / ปิดยืนยัน 2 ชั้น / ระงับ / เปลี่ยนสิทธิ์
  * กันแอดมินคนหนึ่ง (หรือคนที่แอบใช้เครื่องที่ล็อกอินค้างไว้) ยึดบัญชีเจ้าของร้าน — ใส่รหัสผิด 5 ครั้ง = ออกจากระบบ
  */
-async function requireReauth(actor, auth = {}, { sessionId } = {}) {
+async function requireReauth(actor, auth = {}, { sessionId, message } = {}) {
   const row = getById(actor.id);
   const pw = auth?.actor_password;
   if (pw === undefined || pw === null || pw === '') {
-    throw new AppError('REAUTH_REQUIRED', 'การกระทำนี้มีผลกับบัญชีแอดมิน — กรุณายืนยันรหัสผ่านของคุณอีกครั้ง', 403, { totp: Boolean(row.totp_secret) });
+    throw new AppError('REAUTH_REQUIRED', message || 'การกระทำนี้มีผลกับบัญชีแอดมิน — กรุณายืนยันรหัสผ่านของคุณอีกครั้ง', 403, { totp: Boolean(row.totp_secret) });
   }
   try {
     await checkCurrentPassword(row, pw, { sessionId, field: 'actor_password', message: 'รหัสผ่านของคุณไม่ถูกต้อง' });
@@ -592,7 +592,7 @@ const bootstrapPasswordFileExists = () => fs.existsSync(path.join(config.dataDir
 module.exports = {
   publicUser, getById, createUser, register, login, loginMfa, changePassword, updateProfile,
   createSession, getSession, destroySession, destroyUserSessions, listSessions, revokeSession,
-  totpSetup, totpEnable, totpDisable, adminResetTotp,
+  totpSetup, totpEnable, totpDisable, adminResetTotp, requireReauth,
   list, detail, setStatus, setRole, setDailyLimit, resetPassword, ensureAdmin, validatePassword,
   bootstrapPasswordFileExists, removeBootstrapPasswordFile,
 };

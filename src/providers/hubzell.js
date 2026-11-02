@@ -90,6 +90,16 @@ function note404(endpoint) {
   alertAdmin('hubzell-404', `${reason}\nล่าสุด: ${endpoint}`, { cooldownSec: 600 });
 }
 
+// ───────────── กันโดนบล็อก IP: บัญชียังไม่ผ่าน KYC (HubZell บล็อกเมื่อตอบ KYC_NOT_APPROVED ครบ 5 ครั้งใน 5 นาที) ─────────────
+// การพักร้าน (breaker) กันเฉพาะการส่งรายการ — ตัวนับนี้กันการเช็กเครดิต/ทดสอบคีย์ซ้ำๆ ด้วย (เช่น แอดมินบันทึกคีย์หลายรอบ)
+const KYC_BUDGET = 2;
+const kycAt = [];
+function recentKyc() {
+  const cut = Date.now() - NOT_FOUND_WINDOW_MS;
+  while (kycAt.length && kycAt[0] <= cut) kycAt.shift();
+  return kycAt.length;
+}
+
 // ───────────── ส่งรายการใหม่พร้อมกันได้จำกัด (ถ้าบัญชีมีปัญหา จะเสียแค่ไม่กี่คำขอก่อนพัก) ─────────────
 let creating = 0;
 const createQueue = [];
@@ -143,6 +153,9 @@ async function request(method, endpoint, { body, query = '', action, orderRef, t
   if (recent404() >= NOT_FOUND_BUDGET) {
     return notSentRes('หยุดเรียก HubZell ชั่วคราว (เจอ "ไม่พบ" หลายครั้งใน 5 นาที — กันโดนบล็อก IP)', { guarded: true });
   }
+  if (recentKyc() >= KYC_BUDGET) {
+    return notSentRes('หยุดเรียก HubZell ชั่วคราว 5 นาที: บัญชี HubZell ยังไม่ผ่าน KYC (กันโดนบล็อก IP 24 ชม.) — รอ KYC ผ่านก่อนแล้วค่อยลองใหม่', { guarded: true });
+  }
   const raw = body === undefined ? '' : JSON.stringify(body);
   if (!(await takeSlot(action === 'submit' || action === 'resend' ? 15000 : 5000))) {
     return notSentRes('ส่งคำขอถี่เกินกำหนด (รอคิวไม่ทัน)', { rateLimited: true });
@@ -154,6 +167,7 @@ async function request(method, endpoint, { body, query = '', action, orderRef, t
     rawBody: method === 'GET' ? undefined : raw, logRequest: body === undefined ? null : body, timeoutMs,
   });
   if (res.status === 404) note404(`${method} ${endpoint}`);
+  if (res.json && typeof res.json === 'object' && res.json.code === 'KYC_NOT_APPROVED') kycAt.push(Date.now());
   return res;
 }
 
@@ -272,8 +286,9 @@ function quote(item) {
 
 function configStatus() {
   const missing = [];
-  if (!cfg.apiKey) missing.push('HUBZELL_API_KEY (หน้า Developer ใน HubZell Reseller Console)');
-  if (!cfg.secret) missing.push('HUBZELL_SECRET_KEY');
+  // ใส่ได้ที่หลังบ้าน (ปุ่ม "ใส่คีย์ร้าน") หรือ HUBZELL_API_KEY / HUBZELL_SECRET_KEY ใน environment
+  if (!cfg.apiKey) missing.push('API Key (จากหน้า Developer ใน HubZell Reseller Console)');
+  if (!cfg.secret) missing.push('Secret Key');
   const bad = baseUrlProblem();
   if (bad) missing.push(bad);
   return { ready: missing.length === 0, missing };
@@ -504,7 +519,7 @@ function handleCallback({ rawBody, headers, body }) {
   const data = body && typeof body === 'object' ? body : null;
   const isEndpoint = Boolean(data && data.payload && typeof data.payload === 'object');
   const secret = isEndpoint ? cfg.webhookSecret : cfg.secret;
-  if (!secret) return { ok: false, status: 401, body: 'not configured', error: isEndpoint ? 'ยังไม่ได้ตั้ง HUBZELL_WEBHOOK_SECRET' : 'ยังไม่ได้ตั้ง HUBZELL_SECRET_KEY' };
+  if (!secret) return { ok: false, status: 401, body: 'not configured', error: isEndpoint ? 'ยังไม่ได้ใส่ Webhook signing secret ของ HubZell' : 'ยังไม่ได้ใส่ Secret Key ของ HubZell' };
   if (!safeEqual(sig, hmacSha256(secret, `${ts}\n${rawBody || ''}`))) {
     return { ok: false, status: 401, body: 'invalid signature', error: 'ลายเซ็น callback ของ HubZell ไม่ถูกต้อง' };
   }
@@ -539,6 +554,7 @@ function thaiError(e) {
 /** ใช้ในการทดสอบเท่านั้น: ล้างตัวนับภายใน */
 function _resetGuards() {
   notFoundAt.length = 0;
+  kycAt.length = 0;
   calls.length = 0;
 }
 

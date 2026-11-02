@@ -120,6 +120,7 @@ async function start({ port = config.port, host = config.host } = {}) {
   const orders = require('./services/orders');
   const users = require('./services/users');
   const worker = require('./services/worker');
+  const credentials = require('./services/credentials');
   const { createQueue } = require('./services/queue');
   const { createApp } = require('./http/app');
 
@@ -165,7 +166,10 @@ async function start({ port = config.port, host = config.host } = {}) {
     const ready = p.configStatus();
     logger.info(`   ผู้ให้บริการ ${i + 1} : ${p.label}${ready.ready ? '' : ' — ยังตั้งค่าไม่ครบ (จะไม่ถูกเลือกส่งรายการ)'}`);
     if (!ready.ready) ready.missing.forEach((m) => logger.warn(`     - ขาด: ${m}`));
+    if (!ready.ready && credentials.groupView(name)) logger.warn('       ใส่คีย์ได้ที่หลังบ้าน: /admin → ผู้ให้บริการ & ร้าน → ปุ่ม "ใส่คีย์ร้าน" (ไม่ต้องรีสตาร์ท)');
   });
+  const lostKeys = credentials.unreadableGroups();
+  if (lostKeys.length) logger.warn(`[คีย์ร้าน] คีย์ที่บันทึกในหลังบ้านถอดรหัสไม่ได้ (${lostKeys.join(', ')}) — ไฟล์ ${credentials.keyFile()} หายหรือเปลี่ยน ให้ใส่คีย์ใหม่ในหลังบ้าน`);
   logger.info('════════════════════════════════════════════════════');
   for (const w of [...config.warnings, ...publicUrlWarnings(actualPort)]) logger.warn(`[ตรวจไฟล์ .env] ${w}`);
   // คำเตือนค่าที่พิมพ์ผิดแสดงไปแล้วด้านบน — ตรงนี้แสดงเฉพาะความเสี่ยงของการตั้งค่า

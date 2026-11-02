@@ -2,7 +2,7 @@
 // การโหลดเบื้องหลัง (ไม่นับเป็นการใช้งาน), ยืนยันตัวตนซ้ำ, ยืนยันการเปลี่ยนผู้ให้บริการ, จำนวนเงินเป็นตัวอักษร
 import {
   html, raw, api, ApiError, session, baht, numFmt, navigate, qs, on, modal, confirmDialog, toast, toastError, withLoading,
-  showFieldError, clearFieldErrors,
+  showFieldError, clearFieldErrors, timeAgo,
 } from '../lib.js';
 
 // ───────────── ไอคอน (SVG เส้น 24×24 วาดเอง) ─────────────
@@ -96,6 +96,7 @@ export const ACTION_LABELS = {
   'provider.reset_breaker': 'เปิดรับรายการทันที (รีเซ็ตตัวหยุดอัตโนมัติ)',
   'shop.update': 'แก้ไขชื่อร้าน / ส่วนลดของร้าน',
   'settings.update': 'แก้ไขการตั้งค่าระบบ',
+  'credentials.update': 'ใส่ / แก้คีย์ร้าน หรือช่องทางแจ้งเตือน',
   'apikey.create': 'สร้าง API key',
   'apikey.update': 'แก้ไข API key',
   'apikey.revoke': 'ยกเลิก API key',
@@ -119,6 +120,7 @@ export const ACTION_GROUPS = [
   ['provider.', 'ผู้ให้บริการ / จับคู่บริการ'],
   ['shop.', 'ร้าน (ชื่อ / ส่วนลด)'],
   ['settings.', 'ตั้งค่าระบบ'],
+  ['credentials.', 'คีย์ร้าน / ช่องทางแจ้งเตือน'],
   ['apikey.', 'API ร้านค้า'],
   ['system.', 'ระบบ / แจ้งเตือน / สำรองข้อมูล'],
 ];
@@ -335,21 +337,21 @@ export const shortLabel = (p) => String(p?.label || p?.name || 'ผู้ให�
  * send(extra) → Promise · extra = {} ครั้งแรก จากนั้น { actor_password, actor_code? }
  * คืนผลของ send หรือ null ถ้าผู้ใช้กดยกเลิก (error อื่นโยนต่อ)
  */
-export async function withReauth(send, { what = '' } = {}) {
+export async function withReauth(send, { what = '', reason = '' } = {}) {
   try {
     return await send({});
   } catch (err) {
     if (err?.code !== 'REAUTH_REQUIRED') throw err;
-    return reauthDialog(send, { totp: Boolean(err.details?.totp), what });
+    return reauthDialog(send, { totp: Boolean(err.details?.totp), what, reason });
   }
 }
 
-function reauthDialog(send, { totp, what }) {
+function reauthDialog(send, { totp, what, reason }) {
   const me = session.user || {};
   return modal({
     title: 'ยืนยันตัวตนก่อนทำรายการ',
     body: html`<form class="stack" data-reauth novalidate autocomplete="on">
-      <div class="alert warning"><span class="alert-icon">!</span><div>${what ? html`<b>${what}</b><br>` : ''}การกระทำนี้มีผลกับบัญชีแอดมิน จึงต้องยืนยันว่าเป็นคุณจริง —
+      <div class="alert warning"><span class="alert-icon">!</span><div>${what ? html`<b>${what}</b><br>` : ''}${reason || 'การกระทำนี้มีผลกับบัญชีแอดมิน'} จึงต้องยืนยันว่าเป็นคุณจริง —
         ใส่รหัสผ่าน${totp ? 'และรหัส 6 หลักจากแอปยืนยันตัวตน' : ''}ของบัญชีที่คุณใช้อยู่ตอนนี้${me.email || me.name ? html` (<b>${me.email || me.name}</b>)` : ''}</div></div>
       <div class="field"><label for="ra-pw">รหัสผ่านของคุณ</label>
         <input class="input" id="ra-pw" name="actor_password" type="password" autocomplete="current-password" required><div class="error-text"></div></div>
@@ -391,9 +393,151 @@ function reauthDialog(send, { totp, what }) {
     },
   }).then((r) => {
     if (!r) return null; // ยกเลิก
-    if (r.retryTotp) return reauthDialog(send, { totp: true, what });
+    if (r.retryTotp) return reauthDialog(send, { totp: true, what, reason });
     if (r.ok) return r.value;
     throw r.error;
+  });
+}
+
+// ───────────── คีย์ร้าน / ช่องทางแจ้งเตือน (ใส่ในหลังบ้าน — เซิร์ฟเวอร์ไม่ส่งค่าลับกลับมาเลย) ─────────────
+
+/** สถานะของช่องเดียว: ใส่แล้ว (+ 4 ตัวท้าย) / มาจาก environment / ยังไม่ได้ใส่ */
+function credStatus(f, envLabel) {
+  if (f.unreadable) return html`<span class="badge danger">ใช้ไม่ได้ — กรุณาใส่ใหม่</span>`;
+  const from = f.source === 'env' ? html` <span class="muted small">(จาก ${envLabel})</span>` : '';
+  if (f.type === 'rates') {
+    const std = f.source ? '' : html` <span class="muted small">(ค่ามาตรฐาน — ตรวจให้ตรงกับบัญชีของคุณ)</span>`;
+    return html`${f.networks.map((n) => `${n.name} ${f.value[n.code]}%`).join(' · ')}${from}${std}`;
+  }
+  if (!f.set) return f.required ? html`<span class="badge danger plain">ยังไม่ได้ใส่</span>` : html`<span class="muted">ไม่ได้ใส่</span>`;
+  return f.secret
+    ? html`<span class="text-success">ใส่แล้ว</span>${f.hint ? html` <span class="mono">${f.hint}</span>` : ''}${from}`
+    : html`<span class="mono">${f.value}</span>${from}`;
+}
+
+/** สรุปคีย์ทุกช่องของกลุ่ม (บนการ์ดร้าน / การ์ดแจ้งเตือน) */
+export const credentialRows = (g) => html`<dl class="dl">${g.fields.map((f) => html`<dt>${f.label}</dt><dd>${credStatus(f, g.env_label)}</dd>`)}</dl>`;
+
+/** มีช่องที่ใส่ในหลังบ้านแล้วหรือยัง (ปุ่ม "ใส่คีย์ร้าน" / "แก้คีย์ร้าน") */
+export const credentialsSet = (g) => g.fields.some((f) => f.source === 'admin');
+
+function credField(f, envLabel) {
+  const id = `cred-${f.key}`;
+  const meta = f.updated_at ? html` <span class="muted xsmall">· แก้ล่าสุด ${timeAgo(f.updated_at)}${f.updated_by ? ` โดย ${f.updated_by}` : ''}</span>` : '';
+  const status = html`<div class="small">${credStatus(f, envLabel)}${meta}</div>`;
+  const clear = f.source === 'admin' || f.unreadable
+    ? html`<label class="check small mt-1"><input type="checkbox" name="clear:${f.key}"> ลบค่านี้${f.env_set ? ` (กลับไปใช้ค่าจาก ${envLabel})` : ''}</label>`
+    : '';
+  const help = f.help ? html`<div class="help">${f.help}</div>` : '';
+  if (f.type === 'rates') {
+    return html`<div class="field" data-field="${f.key}"><label>${f.label}</label>${status}
+      <div class="row wrap mt-1" style="--gap:12px">${f.networks.map((n) => html`<label class="row small" style="--gap:6px">${n.name}
+        <input class="input" type="number" inputmode="decimal" min="0" max="30" step="0.01" name="${f.key}.${n.code}" value="${f.value[n.code]}" style="width:92px" aria-label="${f.label} ${n.name}"> %</label>`)}</div>
+      ${help}${clear}<div class="error-text"></div></div>`;
+  }
+  return html`<div class="field" data-field="${f.key}">
+    <label for="${id}">${f.label}${f.required ? '' : html` <span class="muted small">(ไม่บังคับ)</span>`}</label>${status}
+    <div class="row mt-1" style="--gap:6px">
+      <input class="input mono" id="${id}" name="${f.key}" type="${f.secret ? 'password' : 'text'}" autocomplete="${f.secret ? 'new-password' : 'off'}"
+        spellcheck="false" autocapitalize="off" autocorrect="off" maxlength="600" style="flex:1;min-width:0"
+        placeholder="${f.secret ? (f.set ? 'วางค่าใหม่เพื่อเปลี่ยน (เว้นว่าง = ใช้ค่าเดิม)' : 'วางค่าที่นี่') : ''}" value="${f.secret ? '' : f.value || ''}">
+      ${f.secret ? html`<button type="button" class="btn sm" data-reveal="${id}">แสดง</button>` : ''}
+    </div>${help}${clear}<div class="error-text"></div></div>`;
+}
+
+/** แจ้งผลหลังบันทึก — ร้าน: ผลทดสอบการเชื่อมต่อ (เช็กเครดิต) ทันที */
+function reportCredentialSave(g, r) {
+  const t = r.test;
+  if (!t) {
+    toast(g.provider ? 'บันทึกคีย์แล้ว' : 'บันทึกแล้ว — กด "ส่งข้อความทดสอบ" เพื่อตรวจว่าได้รับจริง', 'success', 6000);
+  } else if (t.ok) {
+    toast(`บันทึกแล้ว — เชื่อมต่อ ${g.label} สำเร็จ · เครดิตคงเหลือ ฿${baht(t.balance)}`, 'success', 8000);
+  } else if (t.skipped) {
+    toast(`บันทึกคีย์แล้ว — ${t.message}`, 'info', 8000);
+  } else {
+    modal({
+      title: `บันทึกคีย์แล้ว แต่ยังเชื่อมต่อ ${g.label} ไม่สำเร็จ`,
+      body: html`<div class="stack"><div class="alert danger"><span class="alert-icon">!</span><div>${t.message}</div></div>
+        <p class="small mb-0">ตรวจว่าคัดลอกคีย์มาครบ และลงทะเบียน IP ขาออกของเซิร์ฟเวอร์กับ ${g.label} แล้ว —
+          ระหว่างนี้ระบบพักร้านนี้ไว้ (ไม่ส่งรายการ) และเช็กให้เองทุก 5 นาที แก้แล้วกด "เช็กเครดิต" ได้เลย</p></div>`,
+      foot: html`<button class="btn primary" data-close>ตกลง</button>`,
+    });
+  }
+}
+
+/**
+ * หน้าต่างใส่/แก้คีย์ของกลุ่มนี้ (ร้าน หรือ การแจ้งเตือน) → ผลจากเซิร์ฟเวอร์ หรือ null (ยกเลิก)
+ * ส่งเฉพาะช่องที่แก้: ค่าลับว่าง = ใช้ค่าเดิม · ติ๊ก "ลบค่านี้" = ลบ · ต้องยืนยันรหัสผ่านตอนบันทึก
+ */
+export function credentialsDialog(g) {
+  const title = g.provider ? `คีย์ร้าน ${g.label}` : g.label;
+  return modal({
+    title: html`${icon('key')} ${title}`,
+    body: html`<form class="stack" data-cred novalidate autocomplete="off">
+      ${g.intro ? html`<p class="small mb-0">${g.intro}</p>` : ''}
+      ${g.unreadable ? html`<div class="alert danger"><span class="alert-icon">!</span><div class="small">คีย์ที่เคยบันทึกไว้ใช้ไม่ได้แล้ว (ไฟล์กุญแจเข้ารหัสบนเซิร์ฟเวอร์หายหรือเปลี่ยน เช่น ย้ายเครื่อง) — กรุณาใส่ใหม่</div></div>` : ''}
+      <div class="alert info"><span class="alert-icon">i</span><div class="small">เก็บแบบเข้ารหัส และไม่แสดงค่าเต็มอีกหลังบันทึก (แม้แต่แอดมิน) — จะเปลี่ยนให้วางค่าใหม่ทับ ·
+        ใช้ได้ทันทีไม่ต้องรีสตาร์ท · ตอนบันทึกต้องยืนยันรหัสผ่านของคุณ</div></div>
+      ${g.fields.map((f) => credField(f, g.env_label))}
+    </form>`,
+    foot: html`<button class="btn" data-close>ยกเลิก</button><button class="btn primary" data-ok>${icon('check')}${g.provider ? 'บันทึกและทดสอบการเชื่อมต่อ' : 'บันทึก'}</button>`,
+    onMount: (dlg, close) => {
+      const form = dlg.querySelector('[data-cred]');
+      const btn = dlg.querySelector('[data-ok]');
+      const touched = new Set(); // ช่องเงินคืนที่แก้ (แก้กลับเป็นค่าเดิม = ยืนยันว่าตรงกับบัญชีแล้ว)
+      form.addEventListener('input', (e) => touched.add(String(e.target.name || '').split('.')[0]));
+      on(form, 'click', '[data-reveal]', (e, b) => {
+        const input = form.querySelector(`#${CSS.escape(b.dataset.reveal)}`);
+        const show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        b.textContent = show ? 'ซ่อน' : 'แสดง';
+      });
+      const collect = () => {
+        const fields = {};
+        for (const f of g.fields) {
+          if (form.querySelector(`[name="clear:${f.key}"]`)?.checked) { fields[f.key] = null; continue; }
+          if (f.type === 'rates') {
+            if (touched.has(f.key)) fields[f.key] = Object.fromEntries(f.networks.map((n) => [n.code, form.querySelector(`[name="${f.key}.${n.code}"]`).value.trim()]));
+            continue;
+          }
+          const v = form.querySelector(`[name="${f.key}"]`).value;
+          if (f.secret) {
+            if (v.trim()) fields[f.key] = f.password ? v : v.trim();
+          } else if (v.trim() !== (f.value || '')) {
+            fields[f.key] = v.trim() || null; // ลบข้อความทั้งหมด = ลบค่านี้
+          }
+        }
+        return fields;
+      };
+      const submit = (e) => {
+        e?.preventDefault();
+        clearFieldErrors(form);
+        const fields = collect();
+        if (!Object.keys(fields).length) { toast('ยังไม่มีการแก้ไข — วางค่าใหม่ในช่องที่ต้องการเปลี่ยน', 'info'); return; }
+        withLoading(btn, async () => {
+          try {
+            const r = await withReauth(
+              (extra) => api.put(`/api/admin/credentials/${encodeURIComponent(g.group)}`, { fields, ...extra }),
+              { what: `บันทึก${title}`, reason: 'การเปลี่ยนคีย์ร้าน/ช่องทางแจ้งเตือนมีผลกับเงินและความปลอดภัยของร้าน' },
+            );
+            if (r) close(r);
+          } catch (err) {
+            if (!showFieldError(form, err)) toastError(err);
+          }
+        });
+      };
+      form.addEventListener('submit', submit);
+      // กด Enter ในช่องกรอก = บันทึก (ฟอร์มมีหลายช่องและปุ่มบันทึกอยู่นอกฟอร์ม เบราว์เซอร์จึงไม่ส่งให้เอง)
+      form.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.isComposing && e.target.matches('input:not([type="checkbox"])')) { e.preventDefault(); submit(); }
+      });
+      btn.addEventListener('click', submit);
+      form.querySelector('input:not([type="checkbox"])')?.focus();
+    },
+  }).then((r) => {
+    if (!r) return null;
+    reportCredentialSave(g, r);
+    return r;
   });
 }
 
@@ -447,7 +591,7 @@ export function testNotify(btn) {
     try {
       const r = await api.post('/api/admin/notify/test', {});
       if (!r?.configured) {
-        toast('ยังไม่ได้ตั้งค่า LINE หรือ Telegram ในไฟล์ .env — ระบบยังส่งข้อความแจ้งเตือนไม่ได้', 'warning', 8000);
+        toast('ยังไม่ได้ตั้งค่า LINE หรือ Telegram — กด "ตั้งค่าแจ้งเตือน" แล้วใส่ token ก่อน', 'warning', 8000);
         return;
       }
       const list = Array.isArray(r.channels) ? r.channels : [];
@@ -458,8 +602,8 @@ export function testNotify(btn) {
           ${list.length ? html`<ul class="golive-list">${list.map((c) => html`<li class="${c.ok ? 'gl-ok' : 'gl-warn'}"><span class="gl-mark" aria-hidden="true">${c.ok ? '✓' : '✕'}</span>
             <span class="gl-txt"><b>${c.name}</b> — ${c.ok ? 'ส่งแล้ว' : html`<span class="text-danger">ส่งไม่สำเร็จ: ${c.error || '-'}</span>`}</span></li>`)}</ul>`
             : html`<p class="mb-0 muted">ไม่มีช่องทางที่ส่งได้</p>`}
-          <p class="small mb-0">${okAll ? 'เปิดแอป LINE / Telegram ในโทรศัพท์ ตรวจว่าได้รับข้อความ "ทดสอบการแจ้งเตือน" — ถ้าไม่ได้รับ ให้ตรวจผู้รับในไฟล์ .env'
-            : 'ตรวจค่า token / ผู้รับในไฟล์ .env แล้วรีสตาร์ทระบบ จากนั้นกดทดสอบอีกครั้ง'}</p></div>`,
+          <p class="small mb-0">${okAll ? 'เปิดแอป LINE / Telegram ในโทรศัพท์ ตรวจว่าได้รับข้อความ "ทดสอบการแจ้งเตือน" — ถ้าไม่ได้รับ ให้ตรวจผู้รับที่ "ตั้งค่าแจ้งเตือน"'
+            : 'ตรวจ token / ผู้รับที่ "ตั้งค่าแจ้งเตือน" (หน้าตั้งค่า) แล้วกดทดสอบอีกครั้ง'}</p></div>`,
         foot: html`<button class="btn primary" data-close>ตกลง</button>`,
       });
     } catch (err) { toastError(err); }

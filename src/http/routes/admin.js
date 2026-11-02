@@ -24,6 +24,7 @@ const backup = require('../../services/backup');
 const securityCheck = require('../../services/securityCheck');
 const providerMap = require('../../services/providerMap');
 const shops = require('../../services/shops');
+const credentials = require('../../services/credentials');
 const providers = require('../../providers');
 const { callbackUrl } = require('../../providers/base');
 const { ok, requireAdmin, csrf, notFoundApi } = require('../middleware');
@@ -194,7 +195,9 @@ const providerView = () => {
   const snap = providerStatus.snapshot();
   return {
     ...snap,
-    providers: snap.providers.map((p) => ({ ...p, callback_url: callbackUrl(p.name) })),
+    // credentials = สถานะคีย์ร้านที่ใส่ในหลังบ้าน (ใส่แล้ว/มาจากไหน — ไม่มีค่าลับ) · null = ร้านนี้ใส่คีย์ในหลังบ้านไม่ได้
+    providers: snap.providers.map((p) => ({ ...p, callback_url: callbackUrl(p.name), credentials: credentials.groupView(p.name) })),
+    notify_credentials: credentials.groupView('notify'),
     callback_url: callbackUrl(snap.name),
     public_url: config.publicUrl,
   };
@@ -276,7 +279,14 @@ router.post('/settings/promptpay-test', async (req, res) => {
   ok(res, { qr_svg: svg, target: formatPromptPayId(id), amount: 100 });
 });
 
-// ส่งข้อความทดสอบไป LINE / Telegram ตามที่ตั้งไว้ใน .env — รู้ผลทันทีว่าส่งถึงไหม
+// ───────────── คีย์ร้าน / ช่องทางแจ้งเตือน (ใส่ในหลังบ้านแทน .env / Railway Variables) ─────────────
+// ไม่ส่งค่าลับกลับเลย (เห็นแค่ ใส่แล้ว + 4 ตัวท้าย) · บันทึกต้องยืนยันรหัสผ่านแอดมิน (actor_password + actor_code ถ้าเปิด 2 ชั้น)
+router.get('/credentials', (req, res) => ok(res, { groups: credentials.list() }));
+router.put('/credentials/:group', async (req, res) => {
+  ok(res, await credentials.update(String(req.params.group), { fields: body(req).fields }, req.user, req.ip, reauth(req), sess(req)));
+});
+
+// ส่งข้อความทดสอบไป LINE / Telegram ตามที่ตั้งไว้ (หลังบ้าน หรือ .env) — รู้ผลทันทีว่าส่งถึงไหม
 router.post('/notify/test', async (req, res) => {
   const r = await require('../../lib/notify').sendTest();
   audit.log(req.user.id, 'system.notify_test', 'notify', null, { configured: r.configured, channels: r.channels.map((c) => `${c.name}:${c.ok ? 'ok' : 'fail'}`) }, req.ip);

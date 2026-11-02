@@ -1,6 +1,6 @@
 // ตั้งค่าระบบ: สถานะผู้ให้บริการ + การแจ้งเตือน + สำรองข้อมูล + ฟอร์มตั้งค่า (สร้างอัตโนมัติจาก schema ของเซิร์ฟเวอร์)
 import { html, raw, api, baht, dateTimeSec, timeAgo, modal, toast, toastError, withLoading, on, copyText, confirmDialog } from '../lib.js';
-import { icon, store, ROUTING_KEYS, confirmRoutingChange, testNotify, shortLabel } from './common.js';
+import { icon, store, ROUTING_KEYS, confirmRoutingChange, testNotify, shortLabel, credentialsDialog, credentialRows } from './common.js';
 
 const CAP_LABELS = { statusCheck: 'เช็กสถานะรายการ', balance: 'เช็กเครดิต', products: 'ดึงรายการแพ็กเกจ', callback: 'รับแจ้งผล (callback)' };
 // คู่มือการเชื่อมต่อของแต่ละเจ้า (โฟลเดอร์ docs ของระบบ)
@@ -25,7 +25,9 @@ function providerPanel(p) {
           <dt>ความสามารถ</dt><dd class="small">${Object.entries(CAP_LABELS).map(([k, l]) => html`<span class="pill" style="margin:0 4px 4px 0">${p.capabilities?.[k] ? '✓' : '✕'} ${l}</span>`)}</dd>
           <dt>เครดิตคงเหลือ</dt><dd>${b && b.balance !== null && b.balance !== undefined ? html`<b>฿${baht(b.balance)}</b>` : '-'} ${b?.checked_at ? html`<span class="muted small">(${timeAgo(b.checked_at)})</span>` : ''}${b?.error ? html`<div class="small text-danger">${b.error}</div>` : ''}</dd>
         </dl>
-        ${p.config.ready ? '' : html`<div class="alert danger"><span class="alert-icon">!</span><div><b>สิ่งที่ยังขาด:</b><ul class="check-list">${p.config.missing.map((m) => html`<li>${m}</li>`)}</ul><div class="small mt-1">แก้ไฟล์ .env แล้วรีสตาร์ทระบบ — ดูขั้นตอนในคู่มือการเชื่อมต่อ ${name}${DOCS[p.name] ? html` (<span class="mono">${DOCS[p.name]}</span>)` : ' (โฟลเดอร์ docs)'}</div></div></div>`}
+        ${p.config.ready ? '' : html`<div class="alert danger"><span class="alert-icon">!</span><div><b>สิ่งที่ยังขาด:</b><ul class="check-list">${p.config.missing.map((m) => html`<li>${m}</li>`)}</ul><div class="small mt-1">${p.providers?.find((x) => x.name === p.name)?.credentials
+          ? html`ใส่คีย์ได้ที่หน้า <a href="#/providers">ผู้ให้บริการ & ร้าน</a> (ปุ่ม "ใส่คีย์ร้าน") — ใช้ได้ทันทีไม่ต้องรีสตาร์ท`
+          : html`แก้ไฟล์ .env แล้วรีสตาร์ทระบบ — ดูขั้นตอนในคู่มือการเชื่อมต่อ ${name}${DOCS[p.name] ? html` (<span class="mono">${DOCS[p.name]}</span>)` : ' (โฟลเดอร์ docs)'}`}</div></div></div>`}
       </div>
       <div class="stack">
         <div><div class="code-label">Callback URL (ให้ ${name} ส่งผลกลับมาที่นี่)</div>
@@ -58,14 +60,19 @@ function providerPanel(p) {
 function notifyCard(p) {
   const n = p.notify || {};
   const any = n.line || n.telegram;
+  const g = p.notify_credentials;
   return html`<section class="card" id="notify" data-focus="notify">
     <div class="card-head"><h3>${icon('bell')} แจ้งเตือนแอดมิน</h3>
-      <button class="btn sm ${any ? 'primary' : ''}" data-act="notify-test">${icon('bell')}ส่งข้อความทดสอบ</button></div>
+      <span class="row wrap" style="--gap:6px">
+        ${g ? html`<button class="btn sm ${any ? '' : 'primary'}" data-act="notify-cred">${icon('key')}ตั้งค่าแจ้งเตือน</button>` : ''}
+        <button class="btn sm ${any ? 'primary' : ''}" data-act="notify-test">${icon('bell')}ส่งข้อความทดสอบ</button></span></div>
     <p class="small mb-1">LINE: ${n.line ? html`<span class="text-success bold">ตั้งค่าแล้ว</span>` : html`<span class="muted">ยังไม่ตั้ง</span>`} ·
       Telegram: ${n.telegram ? html`<span class="text-success bold">ตั้งค่าแล้ว</span>` : html`<span class="muted">ยังไม่ตั้ง</span>`}</p>
+    ${g?.unreadable ? html`<div class="alert danger mb-1"><span class="alert-icon">!</span><div class="small">token ที่บันทึกไว้ใช้ไม่ได้แล้ว (ไฟล์กุญแจเข้ารหัสบนเซิร์ฟเวอร์หายหรือเปลี่ยน) — กด "ตั้งค่าแจ้งเตือน" แล้วใส่ใหม่</div></div>` : ''}
+    ${g && (any || g.fields.some((f) => f.set)) ? html`<div class="mb-1">${credentialRows(g)}</div>` : ''}
     <p class="small muted mb-0">${any
-      ? 'กด "ส่งข้อความทดสอบ" แล้วดูว่าโทรศัพท์ได้รับข้อความ — ระบบจะแจ้งเมื่อมีรายการต้องตรวจสอบ, เครดิตใกล้หมด, ผู้ให้บริการขัดข้อง, มีการแตะบัญชีแอดมิน'
-      : 'ยังไม่ได้ตั้ง — จะไม่รู้ทันทีเมื่อมีรายการต้องตรวจสอบ ตั้งค่าในไฟล์ .env (LINE_CHANNEL_ACCESS_TOKEN + ผู้รับ หรือ TELEGRAM_BOT_TOKEN + chat id) แล้วรีสตาร์ทระบบ'}</p>
+      ? 'กด "ส่งข้อความทดสอบ" แล้วดูว่าโทรศัพท์ได้รับข้อความ — ระบบจะแจ้งเมื่อมีรายการต้องตรวจสอบ, เครดิตใกล้หมด, ผู้ให้บริการขัดข้อง, มีการแตะบัญชีแอดมิน หรือมีการเปลี่ยนคีย์ร้าน'
+      : 'ยังไม่ได้ตั้ง — จะไม่รู้ทันทีเมื่อมีรายการต้องตรวจสอบ กด "ตั้งค่าแจ้งเตือน" แล้วใส่ token ของ LINE หรือ Telegram (ใช้ได้ทันทีไม่ต้องรีสตาร์ท)'}</p>
   </section>`;
 }
 
@@ -326,6 +333,16 @@ export async function render(el, params, query = {}) {
     const act = b.dataset.act;
     if (act === 'pp-test') { promptpayTest(b); return; }
     if (act === 'notify-test') { testNotify(b); return; }
+    if (act === 'notify-cred') {
+      if (!provider?.notify_credentials) return;
+      try {
+        if (await credentialsDialog(provider.notify_credentials)) {
+          store.refresh().catch(() => {});
+          await loadProvider();
+        }
+      } catch (err) { toastError(err); }
+      return;
+    }
     if (act === 'reset-breaker') {
       // เปิดรับทั้งที่ยังไม่ได้แก้ปัญหา (เช่น เครดิตหมด / key / KYC / IP) อาจล้มเหลวซ้ำ และผู้ให้บริการอาจบล็อก → ยืนยันก่อน (เหมือนหน้าอื่น)
       const br = provider?.breaker || {};

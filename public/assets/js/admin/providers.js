@@ -3,7 +3,9 @@ import {
   html, raw, api, baht, dateTimeSec, timeAgo, netBadge, modal, confirmDialog, toast, toastError, withLoading, on, qs, copyText,
   showFieldError, clearFieldErrors,
 } from '../lib.js';
-import { icon, setQuery, emptyRow, networkOptions, store, confirmRoutingChange, ROUTING_KEYS, shortLabel } from './common.js';
+import {
+  icon, setQuery, emptyRow, networkOptions, store, confirmRoutingChange, ROUTING_KEYS, shortLabel, credentialsDialog, credentialRows, credentialsSet,
+} from './common.js';
 
 const sw = (name, checked, label) => html`<label class="switch"><input type="checkbox" name="${name}" ${checked ? raw('checked') : ''}><span class="track"></span><span class="small">${label}</span></label>`;
 const money = (satang) => (satang === null || satang === undefined ? '-' : baht(satang));
@@ -24,6 +26,21 @@ function balanceHtml(b) {
     ${b.error ? html`<div class="small text-danger">${b.error}</div>` : ''}`;
 }
 
+/** คีย์ร้าน: สถานะแต่ละช่อง + ปุ่มใส่/แก้ (ใส่ในหลังบ้านได้เลย ไม่ต้องแก้ .env / Railway) */
+function credBlock(p) {
+  const g = p.credentials;
+  if (!g) return '';
+  return html`<div class="detail-section mt-2">
+    <h4>${icon('key')} คีย์ร้าน</h4>
+    ${g.unreadable ? html`<div class="alert danger mb-1"><span class="alert-icon">!</span><div class="small">คีย์ที่บันทึกไว้ใช้ไม่ได้แล้ว (ไฟล์กุญแจเข้ารหัสบนเซิร์ฟเวอร์หายหรือเปลี่ยน) — กด "ใส่คีย์ร้าน" แล้วใส่ใหม่</div></div>` : ''}
+    ${credentialRows(g)}
+  </div>`;
+}
+
+const credButton = (p, extra = '') => (p.credentials
+  ? html`<button type="button" class="btn sm ${p.config?.ready ? '' : 'primary'} ${extra}" data-cred="${p.name}">${icon('key')}${credentialsSet(p.credentials) ? 'แก้คีย์ร้าน' : 'ใส่คีย์ร้าน'}</button>`
+  : '');
+
 function providerCard(p) {
   const br = p.breaker || {};
   const mapped = p.capabilities?.catalog === 'mapped';
@@ -43,14 +60,18 @@ function providerCard(p) {
       ${p.mappings ? html`<dt>การจับคู่</dt><dd>เปิดใช้ ${p.mappings.enabled} / ${p.mappings.total} รายการ · <a href="#/providers?tab=map:${p.name}">จัดการการจับคู่</a></dd>` : ''}
       <dt>เชื่อมต่อล้มเหลวติดกัน</dt><dd>${br.consecutiveFailures || 0} ครั้ง${br.lastError ? html`<div class="small text-2">ล่าสุด: ${br.lastError}</div>` : ''}</dd>
     </dl>
+    ${credBlock(p)}
     ${br.open ? html`<div class="alert danger mt-2"><span class="alert-icon">!</span><div><b>พักรับรายการชั่วคราว</b>${br.reason ? ` — ${br.reason}` : ''}
       <div class="small">จะเปิดรับเองเวลา ${dateTimeSec(br.openUntil)} · ระหว่างนี้รายการใหม่ไปเจ้าสำรอง (ถ้ามี)</div></div></div>` : ''}
     ${p.config && !p.config.ready ? html`<div class="alert danger mt-2"><span class="alert-icon">!</span><div><b>สิ่งที่ยังขาด:</b>
-      <ul class="check-list small">${(p.config.missing || []).map((m) => html`<li>${m}</li>`)}</ul><div class="small mt-1">แก้ไฟล์ .env แล้วรีสตาร์ทระบบ</div></div></div>` : ''}
+      <ul class="check-list small">${(p.config.missing || []).map((m) => html`<li>${m}</li>`)}</ul>
+      ${p.credentials ? html`<div class="small mt-1">กด "ใส่คีย์ร้าน" แล้ววางคีย์ที่ได้จาก ${shortLabel(p)} — ใช้ได้ทันทีไม่ต้องรีสตาร์ท</div><div class="mt-1">${credButton(p)}</div>`
+        : html`<div class="small mt-1">แก้ไฟล์ .env แล้วรีสตาร์ทระบบ</div>`}</div></div>` : ''}
     ${p.callback_url ? html`<div class="mt-2"><div class="code-label">Callback URL</div>
       <div class="copy-field"><code style="white-space:normal;word-break:break-all">${p.callback_url}</code><button type="button" class="btn sm" data-copy="${p.callback_url}">${icon('copy')}คัดลอก</button></div>
       <div class="small text-danger mt-1">ให้นำ URL นี้ทั้งเส้นไปตั้งที่ผู้ให้บริการ (มีรหัสลับ ห้ามเผยแพร่)</div></div>` : ''}
     <div class="row wrap mt-2">
+      ${p.config?.ready ? credButton(p) : ''}
       ${p.capabilities?.balance ? html`<button type="button" class="btn sm" data-balance="${p.name}">${icon('refresh')}เช็กเครดิต</button>` : ''}
       <button type="button" class="btn sm" data-reset="${p.name}" ${br.open || br.consecutiveFailures ? '' : raw('disabled')}>${icon('bolt')}เปิดใช้อีกครั้ง / รีเซ็ตการพัก</button>
       ${mapped ? html`<a class="btn sm" href="#/providers?tab=map:${p.name}">${icon('table')}จับคู่บริการ</a>` : ''}
@@ -122,6 +143,16 @@ async function providersTab(box, reload) {
   });
 
   on(box, 'click', '[data-copy]', (e, b) => copyText(b.dataset.copy));
+  on(box, 'click', '[data-cred]', async (e, b) => {
+    const p = view.providers.find((x) => x.name === b.dataset.cred);
+    if (!p?.credentials) return;
+    try {
+      if (await credentialsDialog(p.credentials)) {
+        store.refresh().catch(() => {});
+        await reload();
+      }
+    } catch (err) { toastError(err); }
+  });
   on(box, 'click', '[data-balance]', (e, b) => withLoading(b, async () => {
     try {
       const r = await api.post(`/api/admin/providers/${encodeURIComponent(b.dataset.balance)}/refresh-balance`);

@@ -156,6 +156,9 @@ function buildConfig(env = process.env) {
     warnings.push(`PUBLIC_URL=${show(publicUrl)} ต้องขึ้นต้นด้วย http:// หรือ https:// (เช่น https://www.ร้านของคุณ.com) — ไม่อย่างนั้นลิงก์ที่ระบบสร้างจะใช้ไม่ได้`);
   }
   const dataDir = path.resolve(ROOT, str(env.DATA_DIR, 'data'));
+  if (raw('CREDENTIALS_KEY') && raw('CREDENTIALS_KEY').length < 32) {
+    warnings.push('CREDENTIALS_KEY สั้นเกินไป (ควรเป็นตัวอักษรสุ่มยาว 32 ตัวขึ้นไป) — หรือเว้นว่างให้ระบบสร้างกุญแจให้เอง');
+  }
   // ฐานข้อมูล: ตั้ง DATABASE_URL = PostgreSQL / เว้นว่าง = SQLite ไฟล์ในเครื่อง (data/topup.db)
   const databaseUrl = str(env.DATABASE_URL).trim();
   if (databaseUrl && !/^postgres(?:ql)?:\/\/\S+$/i.test(databaseUrl)) {
@@ -194,6 +197,8 @@ function buildConfig(env = process.env) {
       if (v === 'self' || v === "'self'") return "'self'";
       return v.split(/[\s,]+/).filter((o) => /^https?:\/\/[^\s'";]+$/.test(o)).join(' ') || "'none'";
     })(),
+    // กุญแจเข้ารหัสคีย์ร้านที่แอดมินใส่ในหลังบ้าน (ไม่ตั้ง = ระบบสร้างไฟล์ data/credentials.key ให้เอง)
+    credentialsKey: str(env.CREDENTIALS_KEY).trim(),
     orderRefPrefix: str(env.ORDER_REF_PREFIX, 'TP').replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 4) || 'TP',
     admin: {
       email: str(env.ADMIN_EMAIL),

@@ -13,7 +13,7 @@
  *  - dest_ref = เลขที่รายการของเรา (ไม่ซ้ำ, A-Z0-9 ไม่เกิน 20 ตัว) — ส่งซ้ำเลขเดิมได้รหัส 30016
  *  - รหัส 00000 + transaction_id = รับรายการแล้ว (ยังไม่เสร็จ) ผลจริงมาทาง callback (resp_url) ใน 1-5 นาที
  *    หรือเช็กด้วย get_output: status=2 สำเร็จ / status=4 ไม่สำเร็จ (wePAY คืนเงินเข้ากระเป๋า wePAY)
- *  - ต้นทุน = ยอดเติม - เงินคืน (%) ของบัญชี → ตั้งใน WEPAY_DISCOUNTS ให้ตรงกับหน้า "บริการ" ของ wePAY
+ *  - ต้นทุน = ยอดเติม - เงินคืน (%) ของบัญชี → ตั้งในหลังบ้าน (ปุ่ม "คีย์ร้าน" ของ wePAY) หรือ WEPAY_DISCOUNTS ให้ตรงกับหน้า "บริการ" ของ wePAY
  *    (ระบบบันทึกยอดที่ wePAY ตัดจริง total_amount ทุกรายการ และแจ้งเตือนถ้าสูงกว่าราคาขาย)
  *
  *  กันเติมซ้ำ 2 ร้าน: ถือว่า "wePAY ไม่ได้รับรายการ" (ส่งต่อร้านสำรองได้) เฉพาะคำตอบ JSON ที่มีรหัสปฏิเสธในตาราง REJECT
@@ -37,7 +37,7 @@ const LIMITS = { AIS: { min: 10, max: 1500 }, DTAC: { min: 10, max: 800 }, TRUE:
 // [CHECK] รหัสที่ wePAY ตอบตอนส่งรายการ = ปฏิเสธก่อนสร้างรายการแน่นอน (ไม่ตัดเงิน) → ส่งต่อร้านสำรองได้
 //   trip = พักการส่งไป wePAY กี่วินาที (ปัญหาฝั่งบัญชี — ส่งต่อไปก็ไม่ผ่านเหมือนเดิม)
 const REJECT = {
-  20001: { reason: 'ชื่อผู้ใช้หรือรหัสผ่าน wePAY ไม่ถูกต้อง (WEPAY_USERNAME / WEPAY_PASSWORD)', trip: 1800 },
+  20001: { reason: 'ชื่อผู้ใช้หรือรหัสผ่าน API ของ wePAY ไม่ถูกต้อง — แก้ที่ปุ่ม "คีย์ร้าน" ของ wePAY ในหน้าผู้ให้บริการ', trip: 1800 },
   20005: { reason: 'IP ของเซิร์ฟเวอร์ยังไม่ได้ลงทะเบียนกับ wePAY — แจ้ง IP ให้ wePAY เพิ่มก่อน', trip: 1800 },
   30005: { reason: 'wePAY ไม่รับที่อยู่สำหรับแจ้งผล (ตรวจ PUBLIC_URL ว่าเปิดจากอินเทอร์เน็ตได้)', trip: 1800 },
   30019: { reason: 'เครดิตในกระเป๋า wePAY ไม่พอ — กรุณาเติมเครดิต', trip: 600 },
@@ -69,8 +69,9 @@ function apiUrlProblem() {
 
 function configStatus() {
   const missing = [];
-  if (!cfg.username) missing.push('WEPAY_USERNAME (ชื่อผู้ใช้ที่ wePAY เปิด API ให้)');
-  if (!cfg.password) missing.push('WEPAY_PASSWORD');
+  // ใส่ได้ที่หลังบ้าน (ปุ่ม "ใส่คีย์ร้าน") หรือ WEPAY_USERNAME / WEPAY_PASSWORD ใน environment
+  if (!cfg.username) missing.push('ชื่อผู้ใช้ API (ที่ wePAY เปิดให้)');
+  if (!cfg.password) missing.push('รหัสผ่าน API');
   const bad = apiUrlProblem();
   if (bad) missing.push(bad);
   return { ready: missing.length === 0, missing };
