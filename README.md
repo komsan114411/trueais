@@ -9,6 +9,7 @@
 > - **WonDD:** ยังไม่เปิดใช้ API ให้บัญชีนี้ (คำขอ HN69110000001 รอตอบ) — เมื่อได้คู่มือ แก้ `src/providers/wondd.js` ตาม [docs/WONDD-INTEGRATION.md](docs/WONDD-INTEGRATION.md)
 > - ใช้ได้หลายร้านพร้อมกัน ลูกค้าเลือกร้านเองได้ ร้านไหนไม่รับรายการ ระบบส่งต่อร้านอื่นอัตโนมัติ
 > - ค่าเริ่มต้นเป็น **โหมดทดสอบ 2 ร้าน (ร้านทดสอบ A / B)** ใช้ได้ครบทุกฟีเจอร์โดยไม่มีการเติมเงินจริง
+> - **เปิดขายจริง:** ทำตามลำดับใน [docs/GO-LIVE.md](docs/GO-LIVE.md) (ชำระเงิน Railway → IP คงที่ → คีย์ร้าน → ตั้งค่าหลังบ้าน → ทดสอบยอดเล็ก)
 >
 > **ฐานข้อมูล:** ตั้ง `DATABASE_URL` = **PostgreSQL** (แนะนำเมื่อขึ้นคลาวด์ เช่น Railway) · ไม่ตั้ง = **SQLite** ไฟล์เดียวในเครื่อง (`data/topup.db`) เปิดใช้ได้ทันทีไม่ต้องติดตั้งอะไร
 
@@ -206,7 +207,8 @@ TELEGRAM_CHAT_ID=123456789
 
 ## ขึ้นระบบบน Railway
 
-โปรเจกต์นี้มี `Dockerfile` และ `railway.json` (ตรวจ `/api/health` + ปิดระบบอย่างปลอดภัย 40 วินาที) พร้อมใช้กับ Railway:
+โปรเจกต์นี้มี `Dockerfile` พร้อมใช้กับ Railway (Railway เลิกอ่านไฟล์ตั้งค่า `railway.json` สำหรับบริการใหม่แล้ว — ค่าต่างๆ ตั้งในหน้าเว็บของ Railway ตามข้อด้านล่าง)
+เปิดขายจริงหลังตั้งค่าเสร็จ: ทำตาม **[docs/GO-LIVE.md](docs/GO-LIVE.md)**
 
 1. Railway → **New Project → Deploy from GitHub repo** → เลือก repo นี้
 2. ในโปรเจกต์เดียวกัน **+ New → Database → PostgreSQL**
@@ -218,16 +220,20 @@ TELEGRAM_CHAT_ID=123456789
    TRUST_PROXY=1
    ADMIN_EMAIL=อีเมลสำหรับเข้าหลังบ้าน
    RAILWAY_RUN_UID=0
+   RAILWAY_DEPLOYMENT_DRAINING_SECONDS=40
    PROVIDERS=mock,mock2   # เปลี่ยนเป็นร้านจริงเมื่อพร้อม เช่น hubzell,wepay
    ```
+   `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=40` = ตอน deploy ให้เวลาระบบส่งรายการที่ค้างอยู่ให้เสร็จก่อนปิด (ค่าเริ่มต้นของ Railway คือ 0 วินาที — รายการที่กำลังส่งจะค้างแบบ "ไม่ทราบผล")
    ไม่ต้องใส่ `ADMIN_PASSWORD` — ตอนเปิดครั้งแรกระบบสุ่มรหัสผ่านแอดมินให้ ดูได้ที่ **Deployments → View logs** (บรรทัด "รหัสผ่าน :")
    และในไฟล์ `/app/data/ADMIN-PASSWORD.txt` — ล็อกอินแล้วเปลี่ยนรหัสผ่าน + เปิดยืนยันตัวตน 2 ชั้นทันที
    (รหัสผ่านฐานข้อมูลและรหัสลับภายในของระบบ Railway/ระบบสุ่มให้เองเช่นกัน ไม่ต้องตั้ง)
 4. บริการเว็บ → **Settings → Volumes** เพิ่ม Volume ที่ `/app/data` (เก็บสลิปและไฟล์สำรอง — ไม่มี Volume ไฟล์จะหายทุกครั้งที่ deploy)
    `RAILWAY_RUN_UID=0` ทำให้โปรแกรมเขียนลง Volume ได้
 5. **Settings → Networking → Generate Domain** แล้วนำโดเมนไปใส่ `PUBLIC_URL`
+   และ **Settings → Deploy → Healthcheck Path** = `/api/health` (Railway จะสลับไปเวอร์ชันใหม่เมื่อระบบเปิดสำเร็จแล้วเท่านั้น)
 6. `TRUST_PROXY=1` — Railway รับคำขอผ่าน proxy ของ Railway ก่อนเสมอ ค่านี้ทำให้ระบบเห็น IP จริงของลูกค้า (ไม่ตั้ง = ทุกคนถูกมองเป็น IP เดียว การจำกัดความถี่/ล็อกการเข้าสู่ระบบจะกระทบทุกคน)
-7. ร้านที่ต้อง whitelist IP (HubZell / wePAY) ต้องเปิด **Static Outbound IP** ของ Railway (แผน Pro) แล้วนำ IP นั้นไปลงทะเบียน
+7. ร้านที่ต้อง whitelist IP (HubZell / wePAY) ต้องเปิด **Static Outbound IPs** ของ Railway (มีเฉพาะแผน Pro: Settings → Networking → Enable Static IPs) แล้วนำ IP **ทุกตัว** ที่แสดง (ปกติ 3 ตัว) ไปลงทะเบียน
+   แผน Hobby ไม่มีระบบสำรองฐานข้อมูลของ Railway ด้วย — ดาวน์โหลดไฟล์สำรองจากหลังบ้านเก็บไว้นอก Railway ทุกสัปดาห์
 8. รันแค่ **1 replica** (งานเบื้องหลังเช็กสถานะ/ส่ง webhook ออกแบบให้ทำงานที่เดียว)
 9. คำสั่งแอดมินจากเครื่องตัวเอง: ติดตั้ง Railway CLI → `railway link` แล้ว `railway ssh` เข้าเครื่อง แล้วสั่ง `node --disable-warning=ExperimentalWarning scripts/admin.js list`
 
@@ -345,7 +351,7 @@ src/
     ...                เงิน เบอร์โทร พร้อมเพย์ CSV แจ้งเตือน
   http/                เส้นทาง API + ความปลอดภัย
 public/                หน้าเว็บลูกค้า (index.html) และหลังบ้าน (admin.html)
-docs/                  คู่มือเชื่อม WonDD และ API ร้านค้า
+docs/                  คู่มือเปิดขายจริง (GO-LIVE) เชื่อม HubZell / wePAY / WonDD และ API ร้านค้า
 test/                  ชุดทดสอบอัตโนมัติ
 data/                  ไฟล์สลิป ไฟล์สำรอง และฐานข้อมูล SQLite (สร้างอัตโนมัติ — ต้องสำรอง)
 ```

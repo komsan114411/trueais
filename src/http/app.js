@@ -76,8 +76,12 @@ function createApp() {
 
   // หน้าเว็บ
   const pub = path.join(config.root, 'public');
-  const isProd = process.env.NODE_ENV === 'production';
-  app.use('/assets', express.static(path.join(pub, 'assets'), { index: false, maxAge: isProd ? '1h' : 0 }));
+  // ไฟล์ JS/CSS: ให้เบราว์เซอร์ถามเซิร์ฟเวอร์ทุกครั้ง (ไม่เปลี่ยน = ได้ 304 ไม่ต้องโหลดใหม่)
+  // ห้ามเก็บแคชแบบมีอายุ — หลัง deploy เบราว์เซอร์จะได้ไฟล์เก่าปนใหม่ (import ไม่ตรงกัน) หน้าเว็บพังจนแคชหมดอายุ
+  app.use('/assets', express.static(path.join(pub, 'assets'), {
+    index: false,
+    setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache'),
+  }));
   const sendPage = (file) => (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(path.join(pub, file));

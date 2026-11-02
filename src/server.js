@@ -168,8 +168,8 @@ async function start({ port = config.port, host = config.host } = {}) {
   });
   logger.info('════════════════════════════════════════════════════');
   for (const w of [...config.warnings, ...publicUrlWarnings(actualPort)]) logger.warn(`[ตรวจไฟล์ .env] ${w}`);
-  // configWarnings รวมคำเตือนจากไฟล์ .env ไว้แล้ว (สำหรับหน้าแดชบอร์ด) — ตอนเปิดระบบแสดงแค่ส่วนที่ไม่ซ้ำ
-  for (const w of configWarnings().filter((x) => !x.startsWith('ไฟล์ .env: '))) logger.warn(`[ตรวจการตั้งค่า] ${w}`);
+  // คำเตือนค่าที่พิมพ์ผิดแสดงไปแล้วด้านบน — ตรงนี้แสดงเฉพาะความเสี่ยงของการตั้งค่า
+  for (const w of configWarnings({ includeEnv: false })) logger.warn(`[ตรวจการตั้งค่า] ${w}`);
 
   async function close() {
     worker.stop();

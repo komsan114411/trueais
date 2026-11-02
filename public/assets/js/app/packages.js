@@ -1,6 +1,6 @@
 // หน้าแพ็กเกจเน็ต: เบอร์ → เลือกเครือข่าย → เลือกร้าน → เลือกหมวด/แพ็กเกจ → ยืนยัน
 import { html, raw, on, setHTML, bahtShort, navigate, debounce, toast } from '../lib.js';
-import { state, networkOf, orderBlockReason, netVars, onChange, shopList, shopOf, shopOpen, lastShop, refreshUser } from './state.js';
+import { state, networkOf, orderBlockReason, netVars, onChange, shopList, shopOf, shopOpen, lastShop, refreshUser, sellsPackages } from './state.js';
 import { icon } from './icons.js';
 import { pageHead, netTag, mockTips, emptyState, alertBox, nudge } from './ui.js';
 import { phoneFieldHtml, bindPhoneField } from './phonefield.js';
@@ -8,6 +8,13 @@ import { confirmAndOrder } from './confirm.js';
 import { netChoice } from './netchoice.js';
 
 export default async function packagesPage(ctx) {
+  // ยังไม่มีแพ็กเกจขาย (เช่น เปิดเฉพาะร้านที่ขายแต่เติมเงิน) → บอกตรงๆ แทนฟอร์มที่เลือกอะไรไม่ได้
+  if (!sellsPackages()) {
+    setHTML(ctx.view, html`
+      ${pageHead('แพ็กเกจเน็ต')}
+      <section class="card">${emptyState('wifi', 'ยังไม่เปิดขายแพ็กเกจเน็ต', 'ตอนนี้ร้านเปิดเฉพาะเติมเงินมือถือ AIS • True • dtac', html`<a class="btn primary" href="#/topup">${icon('bolt', 18)} ไปเติมเงินมือถือ</a>`)}</section>`);
+    return;
+  }
   const q = ctx.query;
   const cat = () => state.catalog;
   const shops = () => shopList();

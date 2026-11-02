@@ -186,7 +186,7 @@ html { scroll-padding-top: 76px; }
 }
 
 .quick-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-@media (min-width: 760px) { .quick-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+@media (min-width: 760px) { .quick-grid { grid-template-columns: repeat(var(--quick, 6), minmax(0, 1fr)); } }
 .quick {
   display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 6px;
   border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border);

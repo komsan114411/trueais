@@ -240,6 +240,63 @@ test('ไม่รู้ผล (หมดเวลารอ / 500 / ตอบแ
   assert.equal(refunds(ref), 0);
 });
 
+test('แดชบอร์ด "พร้อมเปิดร้าน": บอกว่าเชื่อมต่อ wePAY สำเร็จ/ไม่สำเร็จ และคำแนะนำเฉพาะ Railway (IP คงที่ / เวลาปิดระบบ)', async () => {
+  const securityCheck = require('../src/services/securityCheck');
+  const items = async () => {
+    const r = await admin.get('/api/admin/dashboard');
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    return r.body.data.security;
+  };
+  const find = (list, k) => list.find((i) => i.key === k);
+
+  assert.equal((await providerStatus.refreshBalance('wepay')).error, null);
+  let list = await items();
+  assert.equal(find(list, 'provider_wepay_conn')?.level, 'ok', JSON.stringify(list));
+  assert.ok(find(list, 'providers'), 'ร้านพร้อม → มีข้อ "ผู้ให้บริการพร้อมรับรายการ"');
+  assert.equal(find(list, 'provider_wepay_discounts'), undefined, 'ตั้ง WEPAY_DISCOUNTS แล้ว → ไม่เตือน');
+
+  const saved = { password: config.wepay.password, platform: config.platform, draining: config.drainingSeconds, discountsSet: config.wepay.discountsSet };
+  try {
+    // รหัสผ่านผิด → เช็กเครดิตไม่ผ่าน → "ต้องแก้" พร้อมสาเหตุ และไม่ขึ้นว่าร้านพร้อม
+    config.wepay.password = 'wrong-password';
+    config.platform = 'railway';
+    config.drainingSeconds = 0;
+    config.wepay.discountsSet = false;
+    await providerStatus.refreshBalance('wepay');
+    list = await items();
+    const conn = find(list, 'provider_wepay_conn');
+    assert.equal(conn?.level, 'warn');
+    assert.match(conn.message, /รหัสผ่าน/);
+    assert.match(conn.message, /Static Outbound IPs/, 'บน Railway บอกให้เปิด IP คงที่');
+    assert.equal(find(list, 'providers'), undefined);
+    assert.match(find(list, 'provider_wepay_discounts')?.message || '', /Variables ของ Railway/);
+    assert.match(securityCheck.configWarnings().join('\n'), /RAILWAY_DEPLOYMENT_DRAINING_SECONDS=40/);
+    config.drainingSeconds = 40;
+    assert.doesNotMatch(securityCheck.configWarnings().join('\n'), /RAILWAY_DEPLOYMENT_DRAINING_SECONDS/);
+    config.platform = null;
+    config.drainingSeconds = 0;
+    assert.doesNotMatch(securityCheck.configWarnings().join('\n'), /RAILWAY_DEPLOYMENT_DRAINING_SECONDS/, 'ไม่ได้รันบน Railway → ไม่เตือน');
+  } finally {
+    Object.assign(config, { platform: saved.platform, drainingSeconds: saved.draining });
+    Object.assign(config.wepay, { password: saved.password, discountsSet: saved.discountsSet });
+    breaker.reset();
+  }
+  assert.equal((await providerStatus.refreshBalance('wepay')).error, null);
+});
+
+test('ไฟล์หน้าเว็บ (JS/CSS) ให้เบราว์เซอร์ถามใหม่ทุกครั้ง — deploy แล้วไม่ได้ไฟล์เก่าปนใหม่', async () => {
+  for (const file of ['/assets/js/app.js', '/assets/js/app/state.js', '/assets/css/app.css']) {
+    const r = await fetch(base + file);
+    assert.equal(r.status, 200, file);
+    assert.equal(r.headers.get('cache-control'), 'no-cache', file);
+    const etag = r.headers.get('etag');
+    assert.ok(etag, file);
+    // ส่งแบบเดียวกับเบราว์เซอร์ตอนถามซ้ำ (fetch ของ Node ใส่ Cache-Control: no-cache ให้เองถ้าไม่ระบุ ซึ่งบังคับให้ส่งไฟล์เต็ม)
+    const again = await fetch(base + file, { headers: { 'If-None-Match': etag, 'Cache-Control': 'max-age=0' } });
+    assert.equal(again.status, 304, `${file} ไม่เปลี่ยน = 304`);
+  }
+});
+
 test('เครดิต wePAY / รหัสผ่านผิด → พักร้าน (รายการใหม่ไปร้านสำรอง)', async () => {
   const st = await providerStatus.refreshBalance('wepay');
   assert.equal(st.error, null);

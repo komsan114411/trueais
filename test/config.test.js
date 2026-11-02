@@ -159,6 +159,19 @@ test('ค่าเปิด/ปิด และ PUBLIC_URL ที่พิมพ
   assert.equal(buildConfig({}).debug, false);
 });
 
+test('Railway: รู้ว่ารันบน Railway (ตัวแปร RAILWAY_* ที่ Railway ใส่ให้) + เวลาปิดระบบตอน deploy + ตั้งเงินคืน wePAY เองหรือยัง', () => {
+  const local = buildConfig({});
+  assert.equal(local.platform, null);
+  assert.equal(local.drainingSeconds, 0);
+  assert.equal(local.wepay.discountsSet, false);
+  const rw = buildConfig({ RAILWAY_SERVICE_ID: 'svc-1', RAILWAY_DEPLOYMENT_DRAINING_SECONDS: '40', WEPAY_DISCOUNTS: 'AIS:1.5' });
+  assert.equal(rw.platform, 'railway');
+  assert.equal(rw.drainingSeconds, 40);
+  assert.equal(rw.wepay.discountsSet, true);
+  assert.equal(rw.wepay.discountBp.AIS, 150);
+  assert.equal(buildConfig({ RAILWAY_ENVIRONMENT_ID: 'env-1', RAILWAY_DEPLOYMENT_DRAINING_SECONDS: 'abc' }).drainingSeconds, 0, 'ค่าผิด = ถือว่าไม่ได้ตั้ง');
+});
+
 // ───────────── เปิดระบบไม่สำเร็จ → บอกบรรทัดเดียวว่าต้องแก้ค่าไหน ─────────────
 
 test('start(): ค่าตั้งผิดร้ายแรง → ไม่เปิดระบบ (ไม่แตะฐานข้อมูล)', async () => {

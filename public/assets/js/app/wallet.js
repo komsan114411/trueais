@@ -1,6 +1,6 @@
 // กระเป๋าเงิน: ยอดคงเหลือ, เติมเงินเข้ากระเป๋า (พร้อมเพย์ / โอนบัญชี + แนบสลิป), ประวัติเติมเงิน, รายการเดินบัญชี
 import { html, raw, api, on, setHTML, baht, dateTime, withLoading, toast, toastError, navigate, compressImage, copyText, confirmDialog } from '../lib.js';
-import { state, refreshUser, getDraft, openDeposits } from './state.js';
+import { state, refreshUser, getDraft, openDeposits, sellsPackages } from './state.js';
 import { icon } from './icons.js';
 import { pageHead, emptyState, pager, alertBox, bahtEmphasis, supportLinks, draftBanner, depositBanner } from './ui.js';
 
@@ -31,7 +31,7 @@ export async function walletPage(ctx) {
   const st = { amount: wanted, method: methods[0]?.v || null, tab: q.tab === 'ledger' ? 'ledger' : 'deposits', page: 1 };
 
   setHTML(ctx.view, html`
-    ${pageHead('กระเป๋าเงิน', 'เติมเงินเข้ากระเป๋าครั้งเดียว ใช้เติมมือถือและซื้อแพ็กเกจได้ทันที')}
+    ${pageHead('กระเป๋าเงิน', sellsPackages() ? 'เติมเงินเข้ากระเป๋าครั้งเดียว ใช้เติมมือถือและซื้อแพ็กเกจได้ทันที' : 'เติมเงินเข้ากระเป๋าครั้งเดียว ใช้เติมเงินมือถือได้ทันที')}
     ${openList.length ? html`<div class="mb-2">${depositBanner(openList)}</div>` : ''}
     ${draftBanner() ? html`<div class="mb-2">${draftBanner()}</div>` : ''}
     <div class="wallet-layout">
@@ -40,7 +40,7 @@ export async function walletPage(ctx) {
         <div class="wallet-amount num">฿${baht(u.balance)}</div>
         <div class="wallet-actions">
           <a class="btn sm wallet-btn" href="#/topup">${icon('bolt', 16)} เติมเงินมือถือ</a>
-          <a class="btn sm wallet-btn" href="#/packages">${icon('wifi', 16)} แพ็กเกจเน็ต</a>
+          ${sellsPackages() ? html`<a class="btn sm wallet-btn" href="#/packages">${icon('wifi', 16)} แพ็กเกจเน็ต</a>` : ''}
         </div>
       </section>
       <section class="card">

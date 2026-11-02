@@ -174,6 +174,10 @@ function buildConfig(env = process.env) {
     databaseUrl,
     uploadDir: path.join(dataDir, 'uploads'),
     isProd: env.NODE_ENV === 'production',
+    // รันบน Railway ไหม (Railway ใส่ตัวแปร RAILWAY_* ให้เองตอนรัน) — ใช้ปรับคำแนะนำในหน้าแอดมินให้ตรงกับที่ตั้งค่าจริง
+    platform: env.RAILWAY_SERVICE_ID || env.RAILWAY_ENVIRONMENT_ID || env.RAILWAY_PROJECT_ID ? 'railway' : null,
+    // Railway: เวลาที่ให้ระบบปิดตัวเองก่อนถูกบังคับปิดตอน deploy (ค่าเริ่มต้นของ Railway = 0 วินาที)
+    drainingSeconds: /^\d+$/.test(raw('RAILWAY_DEPLOYMENT_DRAINING_SECONDS')) ? Number(raw('RAILWAY_DEPLOYMENT_DRAINING_SECONDS')) : 0,
     // DEBUG=1 → แสดงรายละเอียดทางเทคนิค (stack) เมื่อเปิดระบบไม่สำเร็จ
     debug: ['1', 'true', 'yes', 'on'].includes(raw('DEBUG').toLowerCase()),
     sessionDays: num('SESSION_DAYS', 7, { min: 1, max: 365 }),
@@ -239,6 +243,8 @@ function buildConfig(env = process.env) {
         const bp = Math.round(Number(v) * 100);
         return bp <= 3000 ? bp : null;
       }, 'เปอร์เซ็นต์ 0-30 เช่น 3 หรือ 1.5'),
+      // ตั้ง WEPAY_DISCOUNTS เองแล้วหรือยัง (ยัง = ใช้เงินคืนมาตรฐานของสมาชิกทั่วไป อาจไม่ตรงกับบัญชีจริง)
+      discountsSet: Boolean(raw('WEPAY_DISCOUNTS')),
     },
     notify: {
       lineToken: str(env.LINE_CHANNEL_ACCESS_TOKEN),

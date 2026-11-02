@@ -1,6 +1,6 @@
 // หน้าแรก
 import { html, api, on, setHTML, baht, bahtShort, phoneFmt } from '../lib.js';
-import { state, netVars, shopList, shopNet, shopOpen, shopServes, networkOf, recentNumbers, refreshUser, openDeposits } from './state.js';
+import { state, netVars, shopList, shopNet, shopOpen, shopServes, networkOf, recentNumbers, refreshUser, openDeposits, sellsPackages, siteTagline } from './state.js';
 import { icon } from './icons.js';
 import { orderItem, emptyState, draftBanner, netTag, depositBanner } from './ui.js';
 
@@ -88,12 +88,14 @@ export default async function homePage(ctx) {
   if (!ctx.alive()) return;
   const u = state.user;
   const popular = pickPopular(c.products);
+  // ยังไม่มีแพ็กเกจขาย (เช่น เปิดเฉพาะร้านเติมเงิน) → ไม่แสดงทางลัดแพ็กเกจ
+  const quick = sellsPackages() ? QUICK : QUICK.filter((q) => q.href !== '#/packages');
 
   setHTML(ctx.view, html`
     <section class="hero">
       <div class="hero-text">
         <div class="hero-kicker">${u ? `สวัสดี คุณ${u.name}` : `ยินดีต้อนรับสู่ ${s.site_name}`}</div>
-        <h1>${s.site_tagline || 'เติมเงินมือถือ & แพ็กเกจเน็ต'}</h1>
+        <h1>${siteTagline(s, 'เติมเงินมือถือ & แพ็กเกจเน็ต')}</h1>
         <p>เติมได้ตลอด 24 ชั่วโมง · ไม่สำเร็จคืนเงินอัตโนมัติ · ตรวจสอบสถานะได้ทุกรายการ</p>
       </div>
       ${u
@@ -122,8 +124,8 @@ export default async function homePage(ctx) {
     </section>
 
     <section class="mt-3">
-      <div class="quick-grid">
-        ${QUICK.map((q) => html`<a class="quick" href="${q.href}"><span class="q-icon">${icon(q.icon, 22)}</span><span>${q.label}</span></a>`)}
+      <div class="quick-grid" style="--quick:${quick.length}">
+        ${quick.map((q) => html`<a class="quick" href="${q.href}"><span class="q-icon">${icon(q.icon, 22)}</span><span>${q.label}</span></a>`)}
       </div>
     </section>
 
@@ -168,7 +170,7 @@ export default async function homePage(ctx) {
     }
     if (!ctx.alive()) return;
     setHTML(box, rows.length ? html`<div class="order-list">${rows.map((o) => orderItem(o))}</div>`
-      : emptyState('clock', 'ยังไม่มีรายการ', 'เริ่มเติมเงินหรือสมัครแพ็กเกจได้เลย', html`<a class="btn primary sm" href="#/topup">เติมเงินมือถือ</a>`));
+      : emptyState('clock', 'ยังไม่มีรายการ', sellsPackages() ? 'เริ่มเติมเงินหรือสมัครแพ็กเกจได้เลย' : 'เริ่มเติมเงินมือถือได้เลย', html`<a class="btn primary sm" href="#/topup">เติมเงินมือถือ</a>`));
   }
   if (box) {
     on(box, 'click', '[data-retry-recent]', (e, el) => {

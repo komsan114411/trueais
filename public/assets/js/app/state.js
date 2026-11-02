@@ -72,6 +72,14 @@ export const shopServes = (shop, netCode) => {
 /** ร้านที่ลูกค้าเลือกได้ตอนนี้ (ไม่ปิดชั่วคราว) */
 export const shopOpen = (shop) => Boolean(shop) && !shop.paused;
 
+/** มีแพ็กเกจเน็ตขายไหม — ไม่มี (เช่น เปิดเฉพาะร้านที่ขายแต่เติมเงิน) = ซ่อนเมนู/ลิงก์แพ็กเกจทั้งเว็บ */
+export const sellsPackages = () => (state.catalog?.products?.length || 0) > 0;
+/** คำโปรยของร้าน — ยังไม่มีแพ็กเกจขาย ตัดคำว่า "& แพ็กเกจเน็ต" ออก (ไม่โฆษณาสิ่งที่ซื้อไม่ได้) */
+export const siteTagline = (s, fallback = '') => {
+  const t = String(s?.site_tagline || fallback);
+  return sellsPackages() ? t : t.replace(/\s*(?:&|และ)\s*(?:สมัคร)?แพ็กเกจ(?:เน็ต)?/, '');
+};
+
 // จำร้านที่ใช้ล่าสุดไว้ในเครื่องนี้ แยกตามบัญชี (ความสะดวกเท่านั้น — อ่าน/เขียนไม่ได้ก็ไม่เป็นไร)
 const LAST_SHOP_KEY = 'topup.lastShop';
 const perUser = (key) => `${key}.${state.user?.id || 'guest'}`;
