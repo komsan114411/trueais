@@ -12,7 +12,9 @@ export default async function packagesPage(ctx) {
   if (!sellsPackages()) {
     setHTML(ctx.view, html`
       ${pageHead('แพ็กเกจเน็ต')}
-      <section class="card">${emptyState('wifi', 'ยังไม่เปิดขายแพ็กเกจเน็ต', 'ตอนนี้ร้านเปิดเฉพาะเติมเงินมือถือ AIS • True • dtac', html`<a class="btn primary" href="#/topup">${icon('bolt', 18)} ไปเติมเงินมือถือ</a>`)}</section>`);
+      <section class="card">${state.catalog?.mode?.ready
+        ? emptyState('wifi', 'ยังไม่เปิดขายแพ็กเกจเน็ต', 'ตอนนี้ร้านเปิดเฉพาะเติมเงินมือถือ AIS • True • dtac', html`<a class="btn primary" href="#/topup">${icon('bolt', 18)} ไปเติมเงินมือถือ</a>`)
+        : emptyState('wifi', 'ยังไม่เปิดขายแพ็กเกจเน็ต', 'ร้านกำลังเตรียมระบบ กรุณากลับมาใหม่ภายหลัง')}</section>`);
     return;
   }
   const q = ctx.query;

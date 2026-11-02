@@ -212,10 +212,14 @@ export default async function topupPage(ctx) {
       : html`<div class="small muted" style="grid-column:1/-1">${empty}</div>`);
     const custom = Boolean(n) && !needShop && customOk();
     customWrap.classList.toggle('hidden', !custom);
-    const r = shopRange();
-    const lo = r ? Math.max(r.min * 100, n.topup.min) : n.topup.min;
-    const hi = r ? Math.min(r.max * 100, n.topup.max) : n.topup.max;
-    amountHelp.textContent = custom ? `เติมได้ ${bahtShort(lo)} - ${bahtShort(hi)} บาท (จำนวนเต็ม)${r ? ` ที่ ${currentShop()?.name || 'ร้านนี้'}` : ''}` : '';
+    let help = '';
+    if (custom) { // custom = เลือกเครือข่ายแล้ว (n มีค่า) — ยังไม่เลือกเครือข่ายห้ามอ่าน n.topup
+      const r = shopRange();
+      const lo = r ? Math.max(r.min * 100, n.topup.min) : n.topup.min;
+      const hi = r ? Math.min(r.max * 100, n.topup.max) : n.topup.max;
+      help = `เติมได้ ${bahtShort(lo)} - ${bahtShort(hi)} บาท (จำนวนเต็ม)${r ? ` ที่ ${currentShop()?.name || 'ร้านนี้'}` : ''}`;
+    }
+    amountHelp.textContent = help;
     if (document.activeElement !== amountInput && !Number.isNaN(st.amount)) amountInput.value = st.amount ? String(st.amount) : '';
     const err = amountError();
     customWrap.classList.toggle('has-error', Boolean(err) && custom);
